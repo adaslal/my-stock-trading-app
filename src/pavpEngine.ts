@@ -24,7 +24,7 @@ export interface PAVPResult {
     bins: VolumeBin[];
     poc: number;
     vah: number;
-    val: number; // "p low"
+    val: number; // Value Area Low (distinct from lowestPrice / "P Low")
     highestPrice: number;
     lowestPrice: number;
   } | null;
@@ -42,6 +42,7 @@ export interface PAVPResult {
     volumeSma20: number;
     isVolumeSpiked: boolean; // Institutional spike detector
     isBullishAbsorption: boolean; // CVD Trapped Sellers (Upward fuchsia arrow)
+    isBearishAbsorption: boolean; // CVD Trapped Buyers (Downward fuchsia arrow)
   };
 
   metrics: {
@@ -285,6 +286,10 @@ export function calculatePAVP(candles: Candle[], pvtLength: number = 20, numProf
   // absorptionMult defaults to 1.5 to match reliance_scalping_composite.pine / reliance_scalping_strategy.pine / scan_real_market.py -- change all together.
   const isBullishAbsorption = latestDelta < -avgAbsDelta * absorptionMult && latestCandle.close > (latestCandle.high + latestCandle.low) / 2.0;
 
+  // Bearish CVD Absorption: Significant buy delta, but close in the lower half of the bar (upper wick) -- trapped buyers.
+  // Mirrors isBullishAbsorption; keep absorptionMult in sync across the same files listed above.
+  const isBearishAbsorption = latestDelta > avgAbsDelta * absorptionMult && latestCandle.close < (latestCandle.high + latestCandle.low) / 2.0;
+
 
   // 6. Setup Rating Calculations
   const isLongTermUptrend = lastClose > sma200 && sma50 > sma200;
@@ -343,7 +348,8 @@ export function calculatePAVP(candles: Candle[], pvtLength: number = 20, numProf
       isVolumeDriedUp,
       volumeSma20,
       isVolumeSpiked,
-      isBullishAbsorption
+      isBullishAbsorption,
+      isBearishAbsorption
     },
 
     metrics: {

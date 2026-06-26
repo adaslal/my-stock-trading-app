@@ -230,14 +230,27 @@ body {
 }
 
 @keyframes pulse-pink {
-  0%, 100% { 
-    transform: scale(1); 
-    box-shadow: 0 0 4px var(--color-pink); 
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 4px var(--color-pink);
     opacity: 1;
   }
-  50% { 
-    transform: scale(1.2); 
-    box-shadow: 0 0 12px var(--color-pink); 
+  50% {
+    transform: scale(1.2);
+    box-shadow: 0 0 12px var(--color-pink);
+    opacity: 0.6;
+  }
+}
+
+@keyframes pulse-gold {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 4px var(--color-gold);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.2);
+    box-shadow: 0 0 12px var(--color-gold);
     opacity: 0.6;
   }
 }

@@ -181,6 +181,13 @@ def calculate_pavp(candles, pvt_length=20, num_profile_levels=25, value_area_per
         latest_candle['close'] > (latest_candle['high'] + latest_candle['low']) / 2.0
     )
 
+    # Downward fuchsia arrow criteria (CVD buyers absorbed, low close) -- mirrors
+    # is_bullish_absorption above. Trapped buyers near the top -> bearish reversal.
+    is_bearish_absorption = (
+        latest_delta > avg_abs_delta * absorption_mult and
+        latest_candle['close'] < (latest_candle['high'] + latest_candle['low']) / 2.0
+    )
+
     # Simple Squeeze check
     is_squeezed = False
     
@@ -195,6 +202,7 @@ def calculate_pavp(candles, pvt_length=20, num_profile_levels=25, value_area_per
         'highestPrice': float(highest_price),
         'lowestPrice': float(lowest_price),
         'isBullishAbsorption': is_bullish_absorption,
+        'isBearishAbsorption': is_bearish_absorption,
         'latestDelta': float(latest_delta),
         'avgAbsDelta': float(avg_abs_delta),
         'isSqueezed': is_squeezed,
@@ -315,7 +323,8 @@ def main():
                         'isVolumeDriedUp': False,
                         'volumeSma20': 100000.0,
                         'isVolumeSpiked': False,
-                        'isBullishAbsorption': pavp_res['isBullishAbsorption']
+                        'isBullishAbsorption': pavp_res['isBullishAbsorption'],
+                        'isBearishAbsorption': pavp_res['isBearishAbsorption']
                     },
                     'metrics': {
                         'sma200': latest_price,
@@ -331,16 +340,27 @@ def main():
             }
             
             results.append(scanned_stock)
-            
-            # Check setup criteria
+
+            # Check setup criteria (Long / Explosive)
             # 1. Close price lies between VAH and Profile High (p high)
-            in_range = latest_price >= pavp_res['vah'] and latest_price <= pavp_res['highestPrice']
-            # 2. Fuchsia arrow active
-            has_arrow = pavp_res['isBullishAbsorption']
-            
-            if in_range and has_arrow:
+            in_range_long = latest_price >= pavp_res['vah'] and latest_price <= pavp_res['highestPrice']
+            # 2. Upward fuchsia arrow active
+            has_arrow_long = pavp_res['isBullishAbsorption']
+
+            # Check setup criteria (Short / Breakdown) -- mirrors the long check above.
+            # 1. Close price lies between Profile Low (p low) and VAL
+            in_range_short = latest_price >= pavp_res['lowestPrice'] and latest_price <= pavp_res['val']
+            # 2. Downward fuchsia arrow active
+            has_arrow_short = pavp_res['isBearishAbsorption']
+
+            if in_range_long and has_arrow_long:
+                scanned_stock['setupDirection'] = 'long'
                 matches.append(scanned_stock)
-                print(f"🚀 MATCH FOUND: {ticker.replace('.NS', '')} - Close: {latest_price:.2f} (VAH: {pavp_res['vah']:.2f}, High: {pavp_res['highestPrice']:.2f})")
+                print(f"🚀 LONG MATCH FOUND: {ticker.replace('.NS', '')} - Close: {latest_price:.2f} (VAH: {pavp_res['vah']:.2f}, High: {pavp_res['highestPrice']:.2f})")
+            elif in_range_short and has_arrow_short:
+                scanned_stock['setupDirection'] = 'short'
+                matches.append(scanned_stock)
+                print(f"🔻 SHORT MATCH FOUND: {ticker.replace('.NS', '')} - Close: {latest_price:.2f} (VAL: {pavp_res['val']:.2f}, Low: {pavp_res['lowestPrice']:.2f})")
                 
         except Exception as e:
             continue
@@ -361,7 +381,9 @@ def main():
     with open(output_path, 'w') as f:
         json.dump(output_payload, f, indent=2)
 
-    print(f"\nScan completed. Found {len(matches)} matches.")
+    num_long = sum(1 for m in matches if m.get('setupDirection') == 'long')
+    num_short = sum(1 for m in matches if m.get('setupDirection') == 'short')
+    print(f"\nScan completed. Found {len(matches)} matches ({num_long} long / {num_short} short).")
     print(f"Results written to {output_path} (generatedAt={output_payload['generatedAt']})")
 
 if __name__ == '__main__':

@@ -17,13 +17,28 @@ interface ScannedStock {
 const isExplosiveSetup = (price: number, result: PAVPResult) => {
   const vp = result.volumeProfile;
   if (!vp) return false;
-  
+
   // 1. The present day candle close lies between VAH and Profile High (p high)
   const inRange = price >= vp.vah && price <= vp.highestPrice;
-  
+
   // 2. The present day candle has an upward fuchsia arrow (isBullishAbsorption)
   const hasArrow = result.vdu.isBullishAbsorption;
-  
+
+  return inRange && hasArrow;
+};
+
+// Mirror of isExplosiveSetup for the downside: the breakdown/short equivalent.
+// VAL -> P Low zone (mirrors VAH -> P High) plus a downward fuchsia arrow (trapped buyers).
+const isCollapseSetup = (price: number, result: PAVPResult) => {
+  const vp = result.volumeProfile;
+  if (!vp) return false;
+
+  // 1. The present day candle close lies between Profile Low (p low) and VAL
+  const inRange = price >= vp.lowestPrice && price <= vp.val;
+
+  // 2. The present day candle has a downward fuchsia arrow (isBearishAbsorption)
+  const hasArrow = result.vdu.isBearishAbsorption;
+
   return inRange && hasArrow;
 };
 
@@ -41,7 +56,9 @@ export default function App() {
   // Filter States
   const [selectedCapSize, setSelectedCapSize] = useState<'all' | 'large' | 'mid' | 'small'>('all');
   const [selectedStatus, setSelectedStatus] = useState<'all' | 'support' | 'resistance' | 'inside'>('all');
-  const [explosiveOnly, setExplosiveOnly] = useState<boolean>(false);
+  // Setup direction filter: 'all' = no filter, 'long' = explosive (VAH->P High) setups only,
+  // 'short' = breakdown (VAL->P Low) setups only. Mutually exclusive since a stock can't be both.
+  const [setupFilter, setSetupFilter] = useState<'all' | 'long' | 'short'>('all');
   
   // Sorting State
   const [sortBy, setSortBy] = useState<'proximity' | 'ticker' | 'change'>('proximity');
@@ -264,10 +281,13 @@ export default function App() {
     const statusInfo = getProximityStatus(stock.price, stock.result);
     const matchesStatus = selectedStatus === 'all' || statusInfo.category === selectedStatus;
 
-    // Explosive Breakout Filter
-    const matchesExplosive = !explosiveOnly || isExplosiveSetup(stock.price, stock.result);
+    // Setup Direction Filter (Long/Explosive vs Short/Breakdown)
+    const matchesSetupFilter =
+      setupFilter === 'all' ||
+      (setupFilter === 'long' && isExplosiveSetup(stock.price, stock.result)) ||
+      (setupFilter === 'short' && isCollapseSetup(stock.price, stock.result));
 
-    return matchesSearch && matchesCap && matchesStatus && matchesExplosive;
+    return matchesSearch && matchesCap && matchesStatus && matchesSetupFilter;
   });
 
   // 4. Sort Logic
@@ -517,41 +537,54 @@ export default function App() {
               </div>
             </div>
 
-            {/* Explosive Breakout Toggle */}
+            {/* Setup Direction Filter (Long/Explosive vs Short/Breakdown) */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={{ fontSize: '11px', color: 'var(--text-secondary)', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.03em' }}>Breakout Setups:</span>
-              <button
-                onClick={() => setExplosiveOnly(!explosiveOnly)}
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '8px',
-                  padding: '8px 16px',
-                  backgroundColor: explosiveOnly ? 'rgba(236, 72, 153, 0.15)' : 'rgba(0, 0, 0, 0.15)',
-                  border: `1px solid ${explosiveOnly ? 'rgba(236, 72, 153, 0.4)' : 'var(--border-glass)'}`,
-                  borderRadius: '8px',
-                  color: explosiveOnly ? 'var(--color-pink)' : 'var(--text-secondary)',
-                  fontSize: '11px',
-                  fontWeight: '700',
-                  cursor: 'pointer',
-                  transition: 'var(--transition-smooth)',
-                  userSelect: 'none'
-                }}
-              >
-                <span>🚀 EXPLOSIVE SETUP ONLY</span>
-                {explosiveOnly && (
-                  <span 
-                    style={{ 
-                      width: '6px', 
-                      height: '6px', 
-                      borderRadius: '50%', 
-                      background: 'var(--color-pink)',
-                      display: 'inline-block',
-                      animation: 'pulse-pink 1.5s infinite ease-in-out'
-                    }}
-                  />
-                )}
-              </button>
+              <span style={{ fontSize: '11px', color: 'var(--text-secondary)', fontWeight: '600', textTransform: 'uppercase', letterSpacing: '0.03em' }}>Setups:</span>
+              <div style={{ display: 'flex', gap: '6px', background: 'rgba(0,0,0,0.15)', padding: '4px', borderRadius: '8px', border: '1px solid var(--border-glass)' }}>
+                {[
+                  { value: 'all', label: 'All' },
+                  { value: 'long', label: '🚀 EXPLOSIVE (LONG)' },
+                  { value: 'short', label: '🔻 BREAKDOWN (SHORT)' }
+                ].map(opt => {
+                  const isActive = setupFilter === opt.value;
+                  const activeColor = opt.value === 'long' ? 'var(--color-pink)' : opt.value === 'short' ? 'var(--color-gold)' : '#fff';
+                  return (
+                    <button
+                      key={opt.value}
+                      onClick={() => setSetupFilter(opt.value as any)}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: '6px',
+                        padding: '6px 12px',
+                        backgroundColor: isActive ? 'rgba(255,255,255,0.06)' : 'transparent',
+                        border: 'none',
+                        borderRadius: '6px',
+                        color: isActive ? activeColor : 'var(--text-secondary)',
+                        fontSize: '11px',
+                        fontWeight: '700',
+                        cursor: 'pointer',
+                        transition: 'var(--transition-smooth)',
+                        userSelect: 'none'
+                      }}
+                    >
+                      <span>{opt.label}</span>
+                      {isActive && opt.value !== 'all' && (
+                        <span
+                          style={{
+                            width: '6px',
+                            height: '6px',
+                            borderRadius: '50%',
+                            background: activeColor,
+                            display: 'inline-block',
+                            animation: `pulse-${opt.value === 'long' ? 'pink' : 'gold'} 1.5s infinite ease-in-out`
+                          }}
+                        />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
           </div>
@@ -585,6 +618,8 @@ export default function App() {
                       <ArrowUpDown size={12} style={{ color: sortBy === 'change' ? 'var(--color-cyan)' : 'var(--text-muted)' }} />
                     </div>
                   </th>
+                  <th style={{ padding: '16px 20px', fontSize: '12px', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: '700', textAlign: 'center' }}>CVD Signal</th>
+                  <th style={{ padding: '16px 20px', fontSize: '12px', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: '700', textAlign: 'center' }}>Direction</th>
                   <th style={{ padding: '16px 20px', fontSize: '12px', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: '700', textAlign: 'right' }}>P Low (Support)</th>
                   <th style={{ padding: '16px 20px', fontSize: '12px', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: '700', textAlign: 'right' }}>P Low Diff (%)</th>
                   <th style={{ padding: '16px 20px', fontSize: '12px', color: 'var(--text-muted)', textTransform: 'uppercase', fontWeight: '700', textAlign: 'right' }}>P High (Resistance)</th>
@@ -604,14 +639,14 @@ export default function App() {
               <tbody>
                 {isLoading ? (
                   <tr>
-                    <td colSpan={9} style={{ padding: '120px 0', textAlign: 'center' }}>
+                    <td colSpan={11} style={{ padding: '120px 0', textAlign: 'center' }}>
                       <RefreshCw size={32} style={{ animation: 'spin 3s linear infinite', color: 'var(--color-cyan)', margin: '0 auto 16px auto' }} />
                       <span style={{ color: 'var(--text-secondary)', fontSize: '14px', display: 'block' }}>Running PAVP volume profile scans...</span>
                     </td>
                   </tr>
                 ) : sortedStocks.length === 0 ? (
                   <tr>
-                    <td colSpan={9} style={{ padding: '80px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: '14px' }}>
+                    <td colSpan={11} style={{ padding: '80px 0', textAlign: 'center', color: 'var(--text-muted)', fontSize: '14px' }}>
                       No stocks found matching the active filter criteria.
                     </td>
                   </tr>
@@ -642,11 +677,11 @@ export default function App() {
                               {stock.ticker.replace('.NS', '')}
                             </span>
                             {isExplosiveSetup(stock.price, stock.result) && (
-                              <span 
-                                style={{ 
-                                  fontSize: '9px', 
-                                  fontWeight: '800', 
-                                  padding: '2px 6px', 
+                              <span
+                                style={{
+                                  fontSize: '9px',
+                                  fontWeight: '800',
+                                  padding: '2px 6px',
                                   borderRadius: '4px',
                                   backgroundColor: 'rgba(236, 72, 153, 0.15)',
                                   color: 'var(--color-pink)',
@@ -660,6 +695,27 @@ export default function App() {
                                 }}
                               >
                                 🚀 EXPLOSIVE
+                              </span>
+                            )}
+                            {isCollapseSetup(stock.price, stock.result) && (
+                              <span
+                                style={{
+                                  fontSize: '9px',
+                                  fontWeight: '800',
+                                  padding: '2px 6px',
+                                  borderRadius: '4px',
+                                  backgroundColor: 'rgba(245, 158, 11, 0.15)',
+                                  color: 'var(--color-gold)',
+                                  border: '1px solid rgba(245, 158, 11, 0.3)',
+                                  textTransform: 'uppercase',
+                                  letterSpacing: '0.05em',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '2px',
+                                  boxShadow: 'var(--glow-gold)'
+                                }}
+                              >
+                                🔻 BREAKDOWN
                               </span>
                             )}
                           </div>
@@ -695,6 +751,52 @@ export default function App() {
                         {/* Daily Change */}
                         <td style={{ padding: '14px 20px', textAlign: 'right', fontWeight: '700', color: stock.change >= 0 ? 'var(--color-green)' : 'var(--color-red)' }}>
                           {stock.change >= 0 ? '+' : ''}{stock.change.toFixed(2)}%
+                        </td>
+
+                        {/* CVD Signal -- raw order-flow direction on the latest candle, based on CVD + volume.
+                            Independent of price zone: tells you bullish/bearish absorption bias even
+                            when the stock isn't sitting inside an Explosive/Breakdown zone. */}
+                        <td style={{ padding: '14px 20px', textAlign: 'center' }}>
+                          {stock.result.vdu.isBullishAbsorption ? (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '13px', fontWeight: '800', color: 'var(--color-cyan)' }}>
+                              ▲ BULLISH
+                            </span>
+                          ) : stock.result.vdu.isBearishAbsorption ? (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '13px', fontWeight: '800', color: 'var(--color-gold)' }}>
+                              ▼ BEARISH
+                            </span>
+                          ) : (
+                            <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>–</span>
+                          )}
+                        </td>
+
+                        {/* Direction -- which zone-confirmed setup (if any) the latest candle qualifies for */}
+                        <td style={{ padding: '14px 20px', textAlign: 'center' }}>
+                          {isExplosiveSetup(stock.price, stock.result) ? (
+                            <span
+                              style={{
+                                display: 'inline-flex', alignItems: 'center', gap: '4px',
+                                padding: '4px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '800',
+                                backgroundColor: 'rgba(236, 72, 153, 0.15)', color: 'var(--color-pink)',
+                                border: '1px solid rgba(236, 72, 153, 0.3)'
+                              }}
+                            >
+                              🚀 LONG
+                            </span>
+                          ) : isCollapseSetup(stock.price, stock.result) ? (
+                            <span
+                              style={{
+                                display: 'inline-flex', alignItems: 'center', gap: '4px',
+                                padding: '4px 10px', borderRadius: '6px', fontSize: '11px', fontWeight: '800',
+                                backgroundColor: 'rgba(245, 158, 11, 0.15)', color: 'var(--color-gold)',
+                                border: '1px solid rgba(245, 158, 11, 0.3)'
+                              }}
+                            >
+                              🔻 SHORT
+                            </span>
+                          ) : (
+                            <span style={{ fontSize: '13px', color: 'var(--text-muted)' }}>–</span>
+                          )}
                         </td>
 
                         {/* P Low Price */}

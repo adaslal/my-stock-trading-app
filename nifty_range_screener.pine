@@ -30,7 +30,7 @@ value_area_pct = input.float(68.0, "Value Area Percentage (%)", minval=10.0, max
 level_proximity = input.float(0.3, "Level Proximity Buffer (%)", minval=0.01, maxval=5.0, group=group_vp,
      tooltip="Proximity threshold to mark support/resistance alerts (as a percentage of price).")
 
-group_arrow = "VAH → P High Bullish Zone Settings"
+group_arrow = "PAVP Zone Confirmation Settings (Bull & Bear)"
 absorption_mult = input.float(1.5, "Absorption Sensitivity (x Avg Abs Delta)", minval=0.5, maxval=5.0, group=group_arrow,
      tooltip="Lower = more signals, less selective. This uses a single-bar OHLCV delta proxy (no intrabar data), the same formula as pavpEngine.ts in your web app, so it can run across the whole watchlist at once. It is not the true intrabar CVD used in reliance_scalping_composite.pine.")
 
@@ -155,48 +155,59 @@ calc_pavp_levels(p_left, p_right, n_levels, va_pct, abs_mult) =>
     bool bullish_delta_ok = bar_delta_proxy < -avg_abs_delta_proxy * abs_mult and close > (high + low) / 2.0
     bool arrow_confirmed = in_vah_phigh_zone and bullish_delta_ok
 
-    [close, p_high_hist, p_low_hist, vah_price_hist, val_price_hist, arrow_confirmed]
+    // Mirror: close strictly between P Low and VAL AND a bearish absorption read
+    // on that same bar (trapped buyers -- heavy buy volume, weak close).
+    bool in_val_plow_zone = not na(val_price_hist) and not na(p_low_hist) and close < val_price_hist and close > p_low_hist
+    bool bearish_delta_ok = bar_delta_proxy > avg_abs_delta_proxy * abs_mult and close < (high + low) / 2.0
+    bool arrow_bear_confirmed = in_val_plow_zone and bearish_delta_ok
+
+    [close, p_high_hist, p_low_hist, vah_price_hist, val_price_hist, arrow_confirmed, arrow_bear_confirmed]
 
 // ==========================================
 // 3. MULTI-TICKER DATA SECURITY REQUESTS
 // ==========================================
 
 get_ticker_data(sym) =>
-    [c, ph, pl, vah, val, arrow] = request.security(sym, timeframe.period, calc_pavp_levels(pivot_left, pivot_right, num_profile_levels, value_area_pct, absorption_mult))
-    [c, ph, pl, vah, val, arrow]
+    [c, ph, pl, vah, val, arrow, bear_arrow] = request.security(sym, timeframe.period, calc_pavp_levels(pivot_left, pivot_right, num_profile_levels, value_area_pct, absorption_mult))
+    [c, ph, pl, vah, val, arrow, bear_arrow]
 
-[c01, ph01, pl01, vah01, val01, arrow01] = get_ticker_data(ticker01)
-[c02, ph02, pl02, vah02, val02, arrow02] = get_ticker_data(ticker02)
-[c03, ph03, pl03, vah03, val03, arrow03] = get_ticker_data(ticker03)
-[c04, ph04, pl04, vah04, val04, arrow04] = get_ticker_data(ticker04)
-[c05, ph05, pl05, vah05, val05, arrow05] = get_ticker_data(ticker05)
-[c06, ph06, pl06, vah06, val06, arrow06] = get_ticker_data(ticker06)
-[c07, ph07, pl07, vah07, val07, arrow07] = get_ticker_data(ticker07)
-[c08, ph08, pl08, vah08, val08, arrow08] = get_ticker_data(ticker08)
-[c09, ph09, pl09, vah09, val09, arrow09] = get_ticker_data(ticker09)
-[c10, ph10, pl10, vah10, val10, arrow10] = get_ticker_data(ticker10)
-[c11, ph11, pl11, vah11, val11, arrow11] = get_ticker_data(ticker11)
-[c12, ph12, pl12, vah12, val12, arrow12] = get_ticker_data(ticker12)
-[c13, ph13, pl13, vah13, val13, arrow13] = get_ticker_data(ticker13)
-[c14, ph14, pl14, vah14, val14, arrow14] = get_ticker_data(ticker14)
-[c15, ph15, pl15, vah15, val15, arrow15] = get_ticker_data(ticker15)
+[c01, ph01, pl01, vah01, val01, arrow01, bear01] = get_ticker_data(ticker01)
+[c02, ph02, pl02, vah02, val02, arrow02, bear02] = get_ticker_data(ticker02)
+[c03, ph03, pl03, vah03, val03, arrow03, bear03] = get_ticker_data(ticker03)
+[c04, ph04, pl04, vah04, val04, arrow04, bear04] = get_ticker_data(ticker04)
+[c05, ph05, pl05, vah05, val05, arrow05, bear05] = get_ticker_data(ticker05)
+[c06, ph06, pl06, vah06, val06, arrow06, bear06] = get_ticker_data(ticker06)
+[c07, ph07, pl07, vah07, val07, arrow07, bear07] = get_ticker_data(ticker07)
+[c08, ph08, pl08, vah08, val08, arrow08, bear08] = get_ticker_data(ticker08)
+[c09, ph09, pl09, vah09, val09, arrow09, bear09] = get_ticker_data(ticker09)
+[c10, ph10, pl10, vah10, val10, arrow10, bear10] = get_ticker_data(ticker10)
+[c11, ph11, pl11, vah11, val11, arrow11, bear11] = get_ticker_data(ticker11)
+[c12, ph12, pl12, vah12, val12, arrow12, bear12] = get_ticker_data(ticker12)
+[c13, ph13, pl13, vah13, val13, arrow13, bear13] = get_ticker_data(ticker13)
+[c14, ph14, pl14, vah14, val14, arrow14, bear14] = get_ticker_data(ticker14)
+[c15, ph15, pl15, vah15, val15, arrow15, bear15] = get_ticker_data(ticker15)
 
 // ==========================================
 // 4. SCREENER STATUS LOGIC
 // ==========================================
 
-get_screen_status(c, ph, pl, vah, arrow, prox) =>
+get_screen_status(c, ph, pl, vah, val, arrow, bear_arrow, prox) =>
     if na(c) or na(ph) or na(pl)
         ["No Range", color.gray, color.white]
     else
         dist_l = (c - pl) / pl * 100.0
         dist_h = (ph - c) / ph * 100.0
         bool in_zone = not na(vah) and c < ph and c > vah
+        bool in_bear_zone = not na(val) and c < val and c > pl
 
         if arrow
             ["🟣 VAH→P HIGH BULLISH CONFIRM", color.rgb(155, 38, 182), color.white]
+        else if bear_arrow
+            ["🟠 VAL→P LOW BEARISH CONFIRM", color.rgb(217, 119, 6), color.white]
         else if in_zone
             ["🔵 IN VAH→P HIGH ZONE", color.rgb(41, 128, 185), color.white]
+        else if in_bear_zone
+            ["🟤 IN VAL→P LOW ZONE", color.rgb(180, 83, 9), color.white]
         else if c <= pl or math.abs(dist_l) <= prox
             ["🟢 AT SUPPORT (P LOW)", color.rgb(46, 204, 113), color.white]
         else if dist_l <= prox * 3.0
@@ -212,50 +223,54 @@ get_screen_status(c, ph, pl, vah, arrow, prox) =>
 // 5. DASHBOARD RENDERING TABLE
 // ==========================================
 
-var table screener_tbl = table.new(get_position(table_pos), 5, 17, bgcolor=color.new(color.black, 20), border_color=color.gray, border_width=1)
+var table screener_tbl = table.new(get_position(table_pos), 7, 17, bgcolor=color.new(color.black, 20), border_color=color.gray, border_width=1)
 
-update_table_row(row_idx, sym, c, ph, pl, vah, arrow, prox) =>
-    [status_text, bg_col, txt_col] = get_screen_status(c, ph, pl, vah, arrow, prox)
+update_table_row(row_idx, sym, c, ph, pl, vah, val, arrow, bear_arrow, prox) =>
+    [status_text, bg_col, txt_col] = get_screen_status(c, ph, pl, vah, val, arrow, bear_arrow, prox)
 
     // Clean Ticker name (removes exchange prefix e.g. NSE:)
     clean_sym = str.contains(sym, ":") ? array.get(str.split(sym, ":"), 1) : sym
 
-    color row_bg = arrow ? color.new(color.rgb(155, 38, 182), 70) : color.new(color.black, 40)
+    color row_bg = arrow ? color.new(color.rgb(155, 38, 182), 70) : bear_arrow ? color.new(color.rgb(217, 119, 6), 70) : color.new(color.black, 40)
 
     table.cell(screener_tbl, 0, row_idx, clean_sym, text_color=color.white, text_size=size.small, bgcolor=row_bg)
     table.cell(screener_tbl, 1, row_idx, na(c) ? "-" : str.tostring(c, "#.00"), text_color=color.white, text_size=size.small, bgcolor=row_bg)
-    table.cell(screener_tbl, 2, row_idx, na(vah) ? "-" : str.tostring(vah, "#.00"), text_color=color.rgb(0, 188, 212), text_size=size.small, bgcolor=row_bg)
-    table.cell(screener_tbl, 3, row_idx, na(ph) ? "-" : str.tostring(ph, "#.00"), text_color=color.rgb(231, 76, 60), text_size=size.small, bgcolor=row_bg)
-    table.cell(screener_tbl, 4, row_idx, status_text, text_color=txt_col, text_size=size.small, bgcolor=bg_col)
+    table.cell(screener_tbl, 2, row_idx, na(pl) ? "-" : str.tostring(pl, "#.00"), text_color=color.rgb(46, 204, 113), text_size=size.small, bgcolor=row_bg)
+    table.cell(screener_tbl, 3, row_idx, na(val) ? "-" : str.tostring(val, "#.00"), text_color=color.rgb(217, 119, 6), text_size=size.small, bgcolor=row_bg)
+    table.cell(screener_tbl, 4, row_idx, na(vah) ? "-" : str.tostring(vah, "#.00"), text_color=color.rgb(0, 188, 212), text_size=size.small, bgcolor=row_bg)
+    table.cell(screener_tbl, 5, row_idx, na(ph) ? "-" : str.tostring(ph, "#.00"), text_color=color.rgb(231, 76, 60), text_size=size.small, bgcolor=row_bg)
+    table.cell(screener_tbl, 6, row_idx, status_text, text_color=txt_col, text_size=size.small, bgcolor=bg_col)
 
 if barstate.islast
     // Header
-    table.cell(screener_tbl, 0, 0, "NIFTY VAH → P HIGH BULLISH SCREENER", text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 10))
-    table.merge_cells(screener_tbl, 0, 0, 4, 0)
+    table.cell(screener_tbl, 0, 0, "NIFTY PAVP LONG/SHORT SCREENER", text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.merge_cells(screener_tbl, 0, 0, 6, 0)
 
     // Column Headers
     table.cell(screener_tbl, 0, 1, "Ticker", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 30))
     table.cell(screener_tbl, 1, 1, "Price", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 30))
-    table.cell(screener_tbl, 2, 1, "VAH", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 30))
-    table.cell(screener_tbl, 3, 1, "P High", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 30))
-    table.cell(screener_tbl, 4, 1, "Status", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(screener_tbl, 2, 1, "P Low", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(screener_tbl, 3, 1, "VAL", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(screener_tbl, 4, 1, "VAH", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(screener_tbl, 5, 1, "P High", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(screener_tbl, 6, 1, "Status", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 30))
 
     // Update data rows
-    update_table_row(2, ticker01, c01, ph01, pl01, vah01, arrow01, level_proximity)
-    update_table_row(3, ticker02, c02, ph02, pl02, vah02, arrow02, level_proximity)
-    update_table_row(4, ticker03, c03, ph03, pl03, vah03, arrow03, level_proximity)
-    update_table_row(5, ticker04, c04, ph04, pl04, vah04, arrow04, level_proximity)
-    update_table_row(6, ticker05, c05, ph05, pl05, vah05, arrow05, level_proximity)
-    update_table_row(7, ticker06, c06, ph06, pl06, vah06, arrow06, level_proximity)
-    update_table_row(8, ticker07, c07, ph07, pl07, vah07, arrow07, level_proximity)
-    update_table_row(9, ticker08, c08, ph08, pl08, vah08, arrow08, level_proximity)
-    update_table_row(10, ticker09, c09, ph09, pl09, vah09, arrow09, level_proximity)
-    update_table_row(11, ticker10, c10, ph10, pl10, vah10, arrow10, level_proximity)
-    update_table_row(12, ticker11, c11, ph11, pl11, vah11, arrow11, level_proximity)
-    update_table_row(13, ticker12, c12, ph12, pl12, vah12, arrow12, level_proximity)
-    update_table_row(14, ticker13, c13, ph13, pl13, vah13, arrow13, level_proximity)
-    update_table_row(15, ticker14, c14, ph14, pl14, vah14, arrow14, level_proximity)
-    update_table_row(16, ticker15, c15, ph15, pl15, vah15, arrow15, level_proximity)
+    update_table_row(2, ticker01, c01, ph01, pl01, vah01, val01, arrow01, bear01, level_proximity)
+    update_table_row(3, ticker02, c02, ph02, pl02, vah02, val02, arrow02, bear02, level_proximity)
+    update_table_row(4, ticker03, c03, ph03, pl03, vah03, val03, arrow03, bear03, level_proximity)
+    update_table_row(5, ticker04, c04, ph04, pl04, vah04, val04, arrow04, bear04, level_proximity)
+    update_table_row(6, ticker05, c05, ph05, pl05, vah05, val05, arrow05, bear05, level_proximity)
+    update_table_row(7, ticker06, c06, ph06, pl06, vah06, val06, arrow06, bear06, level_proximity)
+    update_table_row(8, ticker07, c07, ph07, pl07, vah07, val07, arrow07, bear07, level_proximity)
+    update_table_row(9, ticker08, c08, ph08, pl08, vah08, val08, arrow08, bear08, level_proximity)
+    update_table_row(10, ticker09, c09, ph09, pl09, vah09, val09, arrow09, bear09, level_proximity)
+    update_table_row(11, ticker10, c10, ph10, pl10, vah10, val10, arrow10, bear10, level_proximity)
+    update_table_row(12, ticker11, c11, ph11, pl11, vah11, val11, arrow11, bear11, level_proximity)
+    update_table_row(13, ticker12, c12, ph12, pl12, vah12, val12, arrow12, bear12, level_proximity)
+    update_table_row(14, ticker13, c13, ph13, pl13, vah13, val13, arrow13, bear13, level_proximity)
+    update_table_row(15, ticker14, c14, ph14, pl14, vah14, val14, arrow14, bear14, level_proximity)
+    update_table_row(16, ticker15, c15, ph15, pl15, vah15, val15, arrow15, bear15, level_proximity)
 
 // ==========================================
 // 6. CROSS-TICKER ALERT
@@ -268,3 +283,10 @@ bool any_ticker_confirmed = arrow01 or arrow02 or arrow03 or arrow04 or arrow05 
 
 alertcondition(any_ticker_confirmed, title="VAH→P High Bullish Confirm (Any Watchlist Ticker)",
      message="One or more watchlist tickers now has the latest candle between VAH and P High with bullish absorption confirmed. Check the VAH Zone Screener table for which one(s).")
+
+// Mirror: fires the moment ANY watchlist ticker's latest bar sits between P Low
+// and VAL with bearish absorption confirmed (trapped buyers / breakdown setup).
+bool any_ticker_bear_confirmed = bear01 or bear02 or bear03 or bear04 or bear05 or bear06 or bear07 or bear08 or bear09 or bear10 or bear11 or bear12 or bear13 or bear14 or bear15
+
+alertcondition(any_ticker_bear_confirmed, title="VAL→P Low Bearish Confirm (Any Watchlist Ticker)",
+     message="One or more watchlist tickers now has the latest candle between P Low and VAL with bearish absorption confirmed. Check the VAH Zone Screener table for which one(s).")

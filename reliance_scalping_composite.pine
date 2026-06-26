@@ -607,6 +607,19 @@ plotshape(vah_phigh_bull_confirm, title="VAH-P HIGH BULL CONFIRM", style=shape.t
      color=color.aqua, size=size.small, text="VAH▲")
 alertcondition(vah_phigh_bull_confirm, title="VAH->P High Bullish Confirm", message="{{ticker}}: price between VAH and P High with bullish absorption confirmation")
 
+// VAL -> P Low Breakdown Confirmation -- mirrors vah_phigh_bull_confirm above for the downside.
+// Fires when the close sits inside the true Profile-Low-to-Value-Area-Low zone AND the same
+// bearish CVD absorption divergence is present, with NO near_support/near_resistance gate --
+// this is the "price between P Low and VAL, confirmed by a downward bearish-absorption signal"
+// setup, matching nifty_range_screener.pine's bear_arrow_confirmed logic and the AEGIS PAVP
+// screener's isCollapseSetup() check in App.tsx.
+bool in_val_plow_zone = not na(val_price_hist) and not na(p_low_hist) and close < val_price_hist and close > p_low_hist
+bool val_plow_bear_confirm = in_val_plow_zone and bar_delta > avg_abs_delta * absorption_mult and close < (high + low) / 2.0
+
+plotshape(val_plow_bear_confirm, title="VAL-P LOW BEAR CONFIRM", style=shape.triangledown, location=location.abovebar,
+     color=color.orange, size=size.small, text="VAL▼")
+alertcondition(val_plow_bear_confirm, title="VAL->P Low Bearish Confirm", message="{{ticker}}: price between P Low and VAL with bearish absorption confirmation")
+
 // ==========================================
 // 6.5 DYNAMIC TRADE STATE TRACKER & TARGETS
 // ==========================================
