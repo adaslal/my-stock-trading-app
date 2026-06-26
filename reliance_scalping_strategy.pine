@@ -1,0 +1,828 @@
+//@version=6
+strategy("Reliance Order Flow Scalping Strategy", "Reliance Strategy", overlay=true, 
+     max_boxes_count=500, max_lines_count=500, 
+     initial_capital=1000000, default_qty_type=strategy.cash, default_qty_value=100000, 
+     commission_type=strategy.commission.percent, commission_value=0.03, slippage=2)
+
+// ==========================================
+// 1. INPUT PARAMETERS & USER SETTINGS
+// ==========================================
+
+group_rel = "Asset Ticker Settings"
+reliance_tick_input = input.float(0.0, "Tick Size Override (0.0 = Auto)", minval=0.0, group=group_rel,
+     tooltip="If set to 0.0, the script automatically detects the asset's minimum tick size (e.g. 0.05 for NSE:RELIANCE).")
+tick_group = input.int(5, "Footprint Row Grouping (Ticks)", minval=1, group=group_rel, 
+     tooltip="Groups ticks to create footprint rows. For example, 5 means each row represents 5 * tick size.")
+
+float reliance_tick = reliance_tick_input > 0.0 ? reliance_tick_input : syminfo.mintick
+
+group_vp = "Pivot Anchored Volume Profile (PAVP)"
+pivot_left = input.int(15, "Pivot Left Strength", minval=1, group=group_vp)
+pivot_right = input.int(15, "Pivot Right Strength", minval=1, group=group_vp)
+num_profile_levels = input.int(24, "Number of Profile Levels (Bins)", minval=5, maxval=100, group=group_vp)
+value_area_pct = input.float(68.0, "Value Area Percentage (%)", minval=10.0, maxval=100.0, group=group_vp)
+profile_width_bars = input.int(35, "Profile Width (Bars)", minval=5, maxval=100, group=group_vp)
+level_proximity = input.float(0.3, "Level Proximity Buffer (%)", minval=0.01, maxval=5.0, group=group_vp,
+     tooltip="How close price needs to be to VAL/VAH/POC to trigger alerts (percentage of price).")
+
+group_ltf = "Lower Timeframe Data (Footprint / CVD)"
+lowerTimeframe = input.timeframe("1", "LTF for Footprint/CVD", group=group_ltf, 
+     tooltip="Lower timeframe used to scan intrabar price & volume. 1m is ideal for 5m chart scalping.")
+imbalance_ratio = input.float(3.0, "Imbalance Ratio (e.g. 3.0 = 300%)", minval=1.0, group=group_ltf)
+show_cvd_plots = input.bool(false, "Show CVD Lines on Chart", group=group_ltf,
+     tooltip="Toggle visibility of the purple/yellow CVD lines at the bottom of the chart.")
+cvd_ema_len = input.int(21, "CVD Signal EMA Length", minval=5, group=group_ltf,
+     tooltip="EMA period for smoothing the CVD line to determine momentum direction & entries.")
+absorption_mult = input.float(1.5, "Absorption Sensitivity (x Avg Abs Delta)", minval=0.5, maxval=5.0, group=group_ltf,
+     tooltip="How far bar_delta must diverge from its 20-bar average to count as CVD absorption. Kept in sync with reliance_scalping_composite.pine / pavpEngine.ts / scan_real_market.py -- change all together.")
+confirm_on_close = input.bool(false, "Require Closed-Bar Confirmation for Footprint Absorption", group=group_ltf,
+     tooltip="OFF (default): trapped buyer/seller detection recalculates every tick, including on the live/most-recent candle. ON: only counts fully-closed bars (the arrow will always be at least one bar behind).")
+
+group_htf = "Higher Timeframe Trend Filter"
+use_htf_filter = input.bool(true, "Enable 1H Trend Filter", group=group_htf)
+htf_ema_fast_len = input.int(5, "1H Fast EMA Length", minval=2, group=group_htf)
+htf_ema_slow_len = input.int(20, "1H Slow EMA Length", minval=5, group=group_htf)
+
+group_opt = "Strategy Optimization Settings"
+use_fixed_exits = input.bool(true, "Use Fixed SL/TP Exits", group=group_opt,
+     tooltip="If checked, uses fixed tick offsets from entry price for SL and TP, ensuring a consistent risk-to-reward ratio. If unchecked, uses PAVP levels.")
+sl_padding_ticks = input.int(80, "Stop Loss Padding (Ticks)", minval=1, group=group_opt,
+     tooltip="Distance below VAL (or below entry if fixed) in ticks. E.g., 80 ticks = 4.00 INR on RELIANCE.")
+min_risk_ticks = input.int(40, "Min Stop Loss Risk (Ticks)", minval=1, group=group_opt,
+     tooltip="Only used when fixed exits are OFF. Ensures stop loss is at least this far from entry price.")
+min_tp_ticks = input.int(160, "Min Take Profit Target (Ticks)", minval=5, group=group_opt,
+     tooltip="Distance above VAH (or above entry if fixed) in ticks. E.g., 160 ticks = 8.00 INR. A value of 160 ticks and SL of 80 ticks yields a 1:2 R:R.")
+min_va_width_ticks = input.int(120, "Min Value Area Width (Ticks)", minval=10, group=group_opt,
+     tooltip="Only enter trades if Value Area (VAH - VAL) is at least this wide. Helps filter low volatility chop. 120 ticks = 6.00 INR.")
+max_chase_ticks = input.int(50, "Max Chase Entry Distance (Ticks)", minval=5, group=group_opt,
+     tooltip="Prevents entering if price has already moved too far from VAL/VAH at the close of the signal bar. 50 ticks = 2.50 INR.")
+require_div_entry = input.bool(false, "Require CVD Divergence for Entry", group=group_opt,
+     tooltip="If checked, require a bullish/bearish CVD divergence to entry (ignores volume dry-up).")
+use_5m_trend_filter = input.bool(true, "Use 5m Trend EMA Filter", group=group_opt,
+     tooltip="If checked, restricts entries to the direction of the 5-minute 50 EMA trend.")
+use_of_reversal_exit = input.bool(false, "Enable CVD Reversal Exit", group=group_opt,
+     tooltip="If checked, trades exit early when CVD crosses its EMA. Uncheck this to allow trades to reach full targets.")
+
+group_dash = "Dashboard Settings"
+show_dashboard = input.bool(true, "Show Dashboard Table", group=group_dash,
+     tooltip="Toggle visibility of the dashboard table in the top-right corner.")
+show_footprint = input.bool(true, "Show Footprint in Dashboard", group=group_dash,
+     tooltip="Toggle visibility of the real-time footprint section at the bottom of the dashboard.")
+
+// ==========================================
+// 2. DATA ACQUISITION & LOWER TIMEFRAME SCANNING
+// ==========================================
+
+// Global volume calculations
+volume_sma20 = ta.sma(volume, 20)
+
+// Fetch 1-Hour Trend (Avoiding lookahead bias by calculating EMAs directly on 1H timeframe)
+calc_htf_data(fast_len, slow_len) =>
+    [ta.ema(close, fast_len)[1], ta.ema(close, slow_len)[1]]
+
+[htf_ema_fast, htf_ema_slow] = request.security(syminfo.tickerid, "60", calc_htf_data(htf_ema_fast_len, htf_ema_slow_len))
+bool htf_bullish = htf_ema_fast > htf_ema_slow
+
+// Request Intrabar Lower Timeframe Arrays
+ltf_highs = request.security_lower_tf(syminfo.tickerid, lowerTimeframe, high)
+ltf_lows = request.security_lower_tf(syminfo.tickerid, lowerTimeframe, low)
+ltf_closes = request.security_lower_tf(syminfo.tickerid, lowerTimeframe, close)
+ltf_volumes = request.security_lower_tf(syminfo.tickerid, lowerTimeframe, volume)
+
+int ltf_sz = array.size(ltf_closes)
+
+// ==========================================
+// 3. CUMULATIVE VOLUME DELTA (CVD) CALCULATIONS
+// ==========================================
+
+float bar_delta = 0.0
+if ltf_sz > 0
+    for i = 0 to ltf_sz - 1
+        float l_h = array.get(ltf_highs, i)
+        float l_l = array.get(ltf_lows, i)
+        float l_c = array.get(ltf_closes, i)
+        float l_v = array.get(ltf_volumes, i)
+        float l_range = l_h - l_l
+        float buy_pct = l_range > 0.0 ? (l_c - l_l) / l_range : 0.5
+        bar_delta += l_v * (2.0 * buy_pct - 1.0)
+else
+    float c_range = high - low
+    float buy_pct = c_range > 0.0 ? (close - low) / c_range : 0.5
+    bar_delta := volume * (2.0 * buy_pct - 1.0)
+
+bool is_new_day = ta.change(time("D")) != 0
+var float cvd = 0.0
+if timeframe.isintraday and is_new_day
+    cvd := 0.0
+cvd := cvd + bar_delta
+
+// Signal line for CVD
+float cvd_ema = ta.ema(cvd, cvd_ema_len)
+
+// Normalize CVD to fit bottom 15% of price chart
+int norm_len = 100
+float highest_price = ta.highest(high, norm_len)
+float lowest_price = ta.lowest(low, norm_len)
+float price_range = highest_price - lowest_price
+
+float highest_cvd = ta.highest(cvd, norm_len)
+float lowest_cvd = ta.lowest(cvd, norm_len)
+float cvd_range = math.max(highest_cvd - lowest_cvd, 1.0)
+
+float norm_cvd = lowest_price + ((cvd - lowest_cvd) / cvd_range) * (price_range * 0.15)
+float norm_cvd_ema = lowest_price + ((cvd_ema - lowest_cvd) / cvd_range) * (price_range * 0.15)
+
+// Plot CVD and its signal line (if enabled in settings)
+plot(show_cvd_plots ? norm_cvd : na, "Normalized CVD", color=color.purple, linewidth=2)
+plot(show_cvd_plots ? norm_cvd_ema : na, "CVD Signal (EMA)", color=color.orange, linewidth=1, style=plot.style_line)
+
+// ==========================================
+// 4. PIVOT ANCHORED VOLUME PROFILE (PAVP)
+// ==========================================
+
+p_high = ta.pivothigh(high, pivot_left, pivot_right)
+p_low = ta.pivotlow(low, pivot_left, pivot_right)
+
+var int last_pivot_index = 0
+
+if not na(p_high)
+    last_pivot_index := bar_index - pivot_right
+if not na(p_low)
+    last_pivot_index := bar_index - pivot_right
+
+// Active Pivot variables
+var box[] profile_boxes = array.new_box()
+var line line_poc = na
+var line line_vah = na
+var line line_val = na
+
+var float val_price = na
+var float vah_price = na
+var float poc_price = na
+var float p_high_val = na
+var float p_low_val = na
+
+if last_pivot_index > 0 and bar_index > last_bar_index - 3000
+    // Cap the lookback loop to a max of 300 bars to prevent nested loop performance issues
+    int bars_since_pivot = math.min(bar_index - last_pivot_index, 300)
+    int start_bar_index = bar_index - bars_since_pivot
+    float max_p = high[bars_since_pivot]
+    float min_p = low[bars_since_pivot]
+    
+    for i = 0 to bars_since_pivot
+        max_p := math.max(max_p, high[i])
+        min_p := math.min(min_p, low[i])
+        
+    float range_p = max_p - min_p
+    float bin_size = range_p / num_profile_levels
+    
+    float[] bin_vols = array.new_float(num_profile_levels, 0.0)
+    float total_vol = 0.0
+    
+    for i = 0 to bars_since_pivot
+        float b_high = high[i]
+        float b_low = low[i]
+        float b_vol = volume[i]
+        float b_range = math.max(b_high - b_low, 0.000001)
+        total_vol += b_vol
+        
+        for k = 0 to num_profile_levels - 1
+            float bin_low = min_p + k * bin_size
+            float bin_high = bin_low + bin_size
+            
+            float overlap_l = math.max(b_low, bin_low)
+            float overlap_h = math.min(b_high, bin_high)
+            if overlap_h > overlap_l
+                float overlap_frac = (overlap_h - overlap_l) / b_range
+                array.set(bin_vols, k, array.get(bin_vols, k) + b_vol * overlap_frac)
+                
+    float max_bin_vol = 0.0
+    int poc_level = 0
+    for k = 0 to num_profile_levels - 1
+        float vol_k = array.get(bin_vols, k)
+        if vol_k > max_bin_vol
+            max_bin_vol := vol_k
+            poc_level := k
+            
+    poc_price := min_p + (poc_level + 0.5) * bin_size
+    
+    float target_va_vol = total_vol * (value_area_pct / 100.0)
+    float va_accum_vol = array.get(bin_vols, poc_level)
+    int level_above = poc_level
+    int level_below = poc_level
+    
+    while va_accum_vol < target_va_vol
+        if level_below == 0 and level_above == num_profile_levels - 1
+            break
+            
+        float vol_above = 0.0
+        if level_above < num_profile_levels - 1
+            vol_above := array.get(bin_vols, level_above + 1)
+            
+        float vol_below = 0.0
+        if level_below > 0
+            vol_below := array.get(bin_vols, level_below - 1)
+            
+        if vol_above == 0.0 and vol_below == 0.0
+            break
+            
+        if vol_above >= vol_below
+            va_accum_vol += vol_above
+            level_above += 1
+        else
+            va_accum_vol += vol_below
+            level_below -= 1
+            
+    val_price := min_p + level_below * bin_size
+    vah_price := min_p + (level_above + 1) * bin_size
+    p_high_val := max_p
+    p_low_val := min_p
+    
+    if barstate.islast
+        // Clear old drawings
+        if array.size(profile_boxes) > 0
+            for idx = 0 to array.size(profile_boxes) - 1
+                box.delete(array.get(profile_boxes, idx))
+            array.clear(profile_boxes)
+            
+        if not na(line_poc)
+            line.delete(line_poc)
+        if not na(line_vah)
+            line.delete(line_vah)
+        if not na(line_val)
+            line.delete(line_val)
+            
+        // Draw profile boxes
+        for k = 0 to num_profile_levels - 1
+            float bin_vol = array.get(bin_vols, k)
+            if bin_vol > 0
+                float bin_low = min_p + k * bin_size
+                float bin_high = bin_low + bin_size
+                
+                int box_width = math.round((bin_vol / max_bin_vol) * profile_width_bars)
+                int left_bar = start_bar_index
+                int right_bar = start_bar_index + box_width
+                
+                bool is_va = (k >= level_below and k <= level_above)
+                color bg_col = is_va ? color.new(color.teal, 85) : color.new(color.gray, 90)
+                color border_col = is_va ? color.new(color.teal, 75) : color.new(color.gray, 85)
+                
+                if k == poc_level
+                    bg_col := color.new(color.orange, 70)
+                    border_col := color.orange
+                    
+                box b = box.new(left=left_bar, top=bin_high, right=right_bar, bottom=bin_low,
+                                 bgcolor=bg_col, border_color=border_col, border_width=1)
+                array.push(profile_boxes, b)
+                
+        line_poc := line.new(x1=start_bar_index, y1=poc_price, x2=bar_index, y2=poc_price, color=color.orange, width=2)
+        line_vah := line.new(x1=start_bar_index, y1=vah_price, x2=bar_index, y2=vah_price, color=color.teal, style=line.style_dashed, width=1)
+        line_val := line.new(x1=start_bar_index, y1=val_price, x2=bar_index, y2=val_price, color=color.red, style=line.style_dashed, width=1)
+
+// Keep track of levels historically
+var float val_price_hist = na
+var float vah_price_hist = na
+var float poc_price_hist = na
+var float p_high_hist = na
+var float p_low_hist = na
+
+if not na(val_price)
+    val_price_hist := val_price
+    vah_price_hist := vah_price
+    poc_price_hist := poc_price
+    p_high_hist := p_high_val
+    p_low_hist := p_low_val
+
+// ==========================================
+// 4.5 PENDING PIVOT COUNTDOWN (NEW BOX EARLY WARNING)
+// ==========================================
+
+int pending_high_countdown = 0
+int pending_low_countdown = 0
+
+// Scan the last pivot_right bars for candidate pivots that are not yet confirmed
+for k = 1 to pivot_right - 1
+    float candidate_high = high[k]
+    bool left_ok_high = true
+    for j = 1 to pivot_left
+        if high[k + j] >= candidate_high
+            left_ok_high := false
+            break
+            
+    if left_ok_high
+        bool right_ok_high = true
+        for j = 0 to k - 1
+            if high[j] >= candidate_high
+                right_ok_high := false
+                break
+                
+        if right_ok_high
+            pending_high_countdown := pivot_right - k
+            break
+
+for k = 1 to pivot_right - 1
+    float candidate_low = low[k]
+    bool left_ok_low = true
+    for j = 1 to pivot_left
+        if low[k + j] <= candidate_low
+            left_ok_low := false
+            break
+            
+    if left_ok_low
+        bool right_ok_low = true
+        for j = 0 to k - 1
+            if low[j] <= candidate_low
+                right_ok_low := false
+                break
+                
+        if right_ok_low
+            pending_low_countdown := pivot_right - k
+            break
+
+string pivot_alert_val = "🟢 STABLE RANGE"
+color pivot_alert_bg = color.new(color.green, 90)
+string pivot_alert_status = "Active Anchor"
+string pivot_alert_detail = str.tostring(bar_index - last_pivot_index) + " bars ago"
+
+if pending_high_countdown > 0
+    pivot_alert_val := "⏳ PENDING HIGH"
+    pivot_alert_bg := color.rgb(243, 156, 18) // Orange
+    pivot_alert_status := "Confirming in:"
+    pivot_alert_detail := str.tostring(pending_high_countdown) + " bars"
+else if pending_low_countdown > 0
+    pivot_alert_val := "⏳ PENDING LOW"
+    pivot_alert_bg := color.rgb(243, 156, 18)
+    pivot_alert_status := "Confirming in:"
+    pivot_alert_detail := str.tostring(pending_low_countdown) + " bars"
+
+// ==========================================
+// 5. INTRABAR FOOTPRINT & IMBALANCES FOR RECENT BARS
+// ==========================================
+
+var bool trapped_buyers = false
+var bool trapped_sellers = false
+trapped_buyers := false
+trapped_sellers := false
+
+var bool active_buy_imb = false
+var bool active_sell_imb = false
+active_buy_imb := false
+active_sell_imb := false
+
+// Active Footprint Arrays for dashboard
+var float[] row_buy_vols = array.new_float(0)
+var float[] row_sell_vols = array.new_float(0)
+var float[] row_prices = array.new_float(0)
+
+if ltf_sz > 0
+    float step = tick_group * reliance_tick
+    float base_low = math.floor(low / step) * step
+    int num_rows = math.ceil((high - base_low) / step) + 1
+    
+    float[] buy_vols = array.new_float(num_rows, 0.0)
+    float[] sell_vols = array.new_float(num_rows, 0.0)
+    
+    // Aggregate lower timeframe details using a structural order flow density approximation
+    for j = 0 to ltf_sz - 1
+        float l_h = array.get(ltf_highs, j)
+        float l_l = array.get(ltf_lows, j)
+        float l_c = array.get(ltf_closes, j)
+        float l_v = array.get(ltf_volumes, j)
+        float l_avg = (l_h + l_l) / 2.0
+        
+        float l_range = l_h - l_l
+        float buy_pct = l_range > 0.0 ? (l_c - l_l) / l_range : 0.5
+        float b_v = l_v * buy_pct
+        float s_v = l_v - b_v
+            
+        int r_idx = math.floor((l_avg - base_low) / step)
+        if r_idx >= 0 and r_idx < num_rows
+            array.set(buy_vols, r_idx, array.get(buy_vols, r_idx) + b_v)
+            array.set(sell_vols, r_idx, array.get(sell_vols, r_idx) + s_v)
+            
+    // Calculate absorption wicks. By default (confirm_on_close=false) this runs every tick,
+    // including on the live/most-recent bar, so the arrow can appear on the candle you're
+    // watching right now. Set confirm_on_close=true to only trust fully-closed bars instead.
+    if not confirm_on_close or not barstate.islast
+        float min_vol_threshold = volume_sma20 * 0.05 / num_rows
+        
+        bool has_upper_wick_buy_imb = false
+        bool has_lower_wick_sell_imb = false
+        
+        for r = 0 to num_rows - 1
+            float bv = array.get(buy_vols, r)
+            float sv = array.get(sell_vols, r)
+            float row_p = base_low + r * step
+            
+            if (bv + sv) > min_vol_threshold
+                if bv > sv * imbalance_ratio
+                    if row_p > math.max(open, close)
+                        has_upper_wick_buy_imb := true
+                else if sv > bv * imbalance_ratio
+                    if row_p < math.min(open, close)
+                        has_lower_wick_sell_imb := true
+                        
+        trapped_buyers := has_upper_wick_buy_imb and close < (high + low) / 2.0
+        trapped_sellers := has_lower_wick_sell_imb and close > (high + low) / 2.0
+            
+    // Check footprint imbalances across all price levels for this bar
+    float avg_vol = volume_sma20 * 0.05 / num_rows
+    for r = 0 to num_rows - 1
+        float bv = array.get(buy_vols, r)
+        float sv = array.get(sell_vols, r)
+        if (bv + sv) > avg_vol
+            if bv > sv * imbalance_ratio
+                active_buy_imb := true
+            if sv > bv * imbalance_ratio
+                active_sell_imb := true
+            
+    // Save current active bar footprint details for the dashboard (reusing persistent arrays to prevent pointer leaks)
+    if barstate.islast
+        array.clear(row_buy_vols)
+        array.clear(row_sell_vols)
+        array.clear(row_prices)
+        for r = 0 to num_rows - 1
+            array.push(row_buy_vols, array.get(buy_vols, r))
+            array.push(row_sell_vols, array.get(sell_vols, r))
+            array.push(row_prices, base_low + r * step)
+
+// ==========================================
+// 6. SCALPING ALERTS & REVERSAL STATE SIGNALS
+// ==========================================
+
+// Proximity calculations
+float dist_val = math.abs(close - p_low_hist) / p_low_hist * 100.0
+float dist_poc = math.abs(close - poc_price_hist) / poc_price_hist * 100.0
+float dist_vah = math.abs(close - p_high_hist) / p_high_hist * 100.0
+
+bool near_support = dist_val <= level_proximity
+bool near_resistance = dist_vah <= level_proximity
+
+// Range Location and Bias Calculations for Dashboard
+bool near_vah = not na(p_high_hist) and dist_vah <= level_proximity
+bool near_val = not na(p_low_hist) and dist_val <= level_proximity
+bool near_poc = not na(poc_price_hist) and dist_poc <= level_proximity
+
+string range_loc = "INSIDE RANGE"
+color range_loc_color = color.white
+string range_bias = "NEUTRAL"
+color range_bias_color = color.gray
+
+if near_vah
+    range_loc := "AT RANGE TOP (P HIGH)"
+    range_loc_color := color.rgb(231, 76, 60) // Red
+    range_bias := "⚠️ AVOID LONGS"
+    range_bias_color := color.rgb(231, 76, 60)
+else if near_val
+    range_loc := "AT RANGE BOTTOM (P LOW)"
+    range_loc_color := color.rgb(46, 204, 113) // Green
+    range_bias := "⚠️ AVOID SHORTS"
+    range_bias_color := color.rgb(231, 76, 60)
+else if near_poc
+    range_loc := "NEAR POC (MIDDLE)"
+    range_loc_color := color.orange
+    range_bias := "POC MAGNET"
+    range_bias_color := color.orange
+else if not na(p_high_hist) and not na(p_low_hist)
+    if close > p_high_hist
+        range_loc := "ABOVE RANGE"
+        range_loc_color := color.rgb(231, 76, 60)
+        range_bias := "EXTREME HIGH"
+        range_bias_color := color.rgb(231, 76, 60)
+    else if close < p_low_hist
+        range_loc := "BELOW RANGE"
+        range_loc_color := color.rgb(46, 204, 113)
+        range_bias := "EXTREME LOW"
+        range_bias_color := color.rgb(46, 204, 113)
+else
+    bool is_bullish = htf_bullish and cvd >= cvd_ema
+    range_bias := is_bullish ? "LONG BIAS" : "SHORT BIAS"
+    range_bias_color := is_bullish ? color.rgb(46, 204, 113) : color.rgb(231, 76, 60)
+
+string proximity_detail = "-"
+if near_vah
+    proximity_detail := "P High Diff: " + str.tostring(close - p_high_hist, "#.##") + " (" + str.tostring(dist_vah, "#.##") + "%)"
+else if near_val
+    proximity_detail := "P Low Diff: " + str.tostring(close - p_low_hist, "#.##") + " (" + str.tostring(dist_val, "#.##") + "%)"
+else if near_poc
+    proximity_detail := "POC Diff: " + str.tostring(close - poc_price_hist, "#.##") + " (" + str.tostring(dist_poc, "#.##") + "%)"
+else if not na(p_high_hist) and not na(p_low_hist)
+    proximity_detail := "Range: " + str.tostring(p_low_hist, "#.##") + " - " + str.tostring(p_high_hist, "#.##")
+
+// Volume Dry Up Check
+bool is_volume_dried_up = volume < volume_sma20 * 0.65
+
+// CVD Divergences
+lowest_low_10 = ta.lowest(low, 10)
+lowest_cvd_10 = ta.lowest(cvd, 10)
+bool price_lower_low = ta.lowest(low, 5) < lowest_low_10[5]
+bool cvd_higher_low = ta.lowest(cvd, 5) > lowest_cvd_10[5]
+bool bullish_cvd_div = price_lower_low and cvd_higher_low
+
+highest_high_10 = ta.highest(high, 10)
+highest_cvd_10 = ta.highest(cvd, 10)
+bool price_higher_high = ta.highest(high, 5) > highest_high_10[5]
+bool cvd_lower_high = ta.highest(cvd, 5) < highest_cvd_10[5]
+bool bearish_cvd_div = price_higher_high and cvd_lower_high
+
+// 5m Trend Filter Calculation
+float chart_ema50 = ta.ema(close, 50)
+bool chart_trend_bullish = close > chart_ema50
+bool buy_trend_ok = not use_5m_trend_filter or chart_trend_bullish
+bool sell_trend_ok = not use_5m_trend_filter or not chart_trend_bullish
+
+// 1H Trend Filter calculations
+bool htf_buy_ok = not use_htf_filter or htf_bullish
+bool htf_sell_ok = not use_htf_filter or not htf_bullish
+
+// Value Area Width check
+float va_width = not na(vah_price_hist) and not na(val_price_hist) ? (vah_price_hist - val_price_hist) : na
+bool va_width_ok = na(va_width) or va_width >= min_va_width_ticks * reliance_tick
+
+// CVD Institutional Absorption (Decoupled Delta)
+float avg_abs_delta = ta.sma(math.abs(bar_delta), 20)
+bool cvd_bearish_absorption = near_resistance and bar_delta > avg_abs_delta * absorption_mult and close < (high + low) / 2.0
+bool cvd_bullish_absorption = near_support and bar_delta < -avg_abs_delta * absorption_mult and close > (high + low) / 2.0
+
+// Divergence vs Volume Dry-Up vs CVD Absorption Gate
+bool prepare_buy_cond = require_div_entry ? (bullish_cvd_div or cvd_bullish_absorption) : (is_volume_dried_up or bullish_cvd_div or cvd_bullish_absorption)
+bool prepare_sell_cond = require_div_entry ? (bearish_cvd_div or cvd_bearish_absorption) : (is_volume_dried_up or bearish_cvd_div or cvd_bearish_absorption)
+
+// Warning States (Prepare Trade)
+bool prepare_buy = near_support and prepare_buy_cond and va_width_ok
+bool prepare_sell = near_resistance and prepare_sell_cond and va_width_ok
+
+// Footprint imbalances are calculated globally inside the LTF aggregation block
+
+// Global crossovers evaluated on every bar to ensure state consistency
+bool cvd_crossover = ta.crossover(cvd, cvd_ema)
+bool cvd_crossunder = ta.crossunder(cvd, cvd_ema)
+
+// Chase Filters
+bool long_chase_ok = na(val_price_hist) or close <= val_price_hist + max_chase_ticks * reliance_tick
+bool short_chase_ok = na(vah_price_hist) or close >= vah_price_hist - max_chase_ticks * reliance_tick
+
+// Confirmation and Execution Signals (Place Trade Now)
+bool buy_now = prepare_buy and (active_buy_imb or cvd_crossover or cvd_bullish_absorption) and buy_trend_ok and htf_buy_ok and long_chase_ok and not near_vah
+bool sell_now = prepare_sell and (active_sell_imb or cvd_crossunder or cvd_bearish_absorption) and sell_trend_ok and htf_sell_ok and short_chase_ok and not near_val
+
+// Warning Markers
+plotshape(prepare_buy and not buy_now, title="PREPARE LONG", style=shape.arrowup, location=location.belowbar,
+     color=color.yellow, size=size.small)
+plotshape(prepare_sell and not sell_now, title="PREPARE SHORT", style=shape.arrowdown, location=location.abovebar,
+     color=color.yellow, size=size.small)
+
+// Trapped Traders Reversals (Absorption - combined footprint and CVD absorption)
+bool absorption_bearish = trapped_buyers or cvd_bearish_absorption
+bool absorption_bullish = trapped_sellers or cvd_bullish_absorption
+
+plotshape(absorption_bearish, title="ABSORPTION BEARISH", style=shape.arrowdown, location=location.abovebar,
+     color=color.fuchsia, size=size.small)
+plotshape(absorption_bullish, title="ABSORPTION BULLISH", style=shape.arrowup, location=location.belowbar,
+     color=color.fuchsia, size=size.small)
+
+// ==========================================
+// 6.5 AUTOMATED STRATEGY EXECUTION ENGINE
+// ==========================================
+
+var float tp_p = na
+var float sl_p = na
+var string exit_reason = ""
+
+// Order execution triggers
+if buy_now
+    strategy.entry("Long", strategy.long, comment="Buy entry")
+if sell_now
+    strategy.entry("Short", strategy.short, comment="Short entry")
+
+// Detect when strategy opens a position to lock in targets
+bool long_opened = strategy.position_size > 0 and strategy.position_size[1] <= 0
+bool short_opened = strategy.position_size < 0 and strategy.position_size[1] >= 0
+
+if long_opened
+    if use_fixed_exits
+        sl_p := close - sl_padding_ticks * reliance_tick
+        tp_p := close + min_tp_ticks * reliance_tick
+    else
+        float val_lvl = not na(p_low_hist) ? p_low_hist : low
+        float poc_lvl = not na(poc_price_hist) ? poc_price_hist : close
+        float vah_lvl = not na(p_high_hist) ? p_high_hist : high
+        float raw_tp = (close < poc_lvl) ? poc_lvl : vah_lvl
+        tp_p := math.max(close + min_tp_ticks * reliance_tick, raw_tp)
+        float raw_sl = val_lvl - sl_padding_ticks * reliance_tick
+        sl_p := math.min(close - min_risk_ticks * reliance_tick, raw_sl)
+    exit_reason := ""
+
+if short_opened
+    if use_fixed_exits
+        sl_p := close + sl_padding_ticks * reliance_tick
+        tp_p := close - min_tp_ticks * reliance_tick
+    else
+        float val_lvl = not na(p_low_hist) ? p_low_hist : low
+        float poc_lvl = not na(poc_price_hist) ? poc_price_hist : close
+        float vah_lvl = not na(p_high_hist) ? p_high_hist : high
+        float raw_tp = (close > poc_lvl) ? poc_lvl : val_lvl
+        tp_p := math.min(close - min_tp_ticks * reliance_tick, raw_tp)
+        float raw_sl = vah_lvl + sl_padding_ticks * reliance_tick
+        sl_p := math.max(close + min_risk_ticks * reliance_tick, raw_sl)
+    exit_reason := ""
+
+// Check order flow exit conditions while in position
+bool long_reversal = use_of_reversal_exit and (cvd_crossunder or trapped_buyers)
+bool short_reversal = use_of_reversal_exit and (cvd_crossover or trapped_sellers)
+
+if strategy.position_size > 0 and long_reversal
+    strategy.close("Long", comment="OF Reversal Exit")
+    exit_reason := "ORDERFLOW REVERSAL"
+
+if strategy.position_size < 0 and short_reversal
+    strategy.close("Short", comment="OF Reversal Exit")
+    exit_reason := "ORDERFLOW REVERSAL"
+
+// Place bracket exits (limit/stop) using locked target prices
+if strategy.position_size > 0
+    strategy.exit("Exit Long", "Long", limit=tp_p, stop=sl_p, comment="Bracket Exit")
+if strategy.position_size < 0
+    strategy.exit("Exit Short", "Short", limit=tp_p, stop=sl_p, comment="Bracket Exit")
+
+// Reset targets when flat
+if strategy.position_size == 0
+    if not long_opened and not short_opened
+        tp_p := na
+        sl_p := na
+        if exit_reason == ""
+            exit_reason := "TARGET REACHED"
+
+// Detect exits for dashboard updates
+bool long_closed = strategy.position_size == 0 and strategy.position_size[1] > 0
+bool short_closed = strategy.position_size == 0 and strategy.position_size[1] < 0
+
+bool trigger_exit_long = long_closed
+bool trigger_exit_short = short_closed
+
+// Determine position state for dashboard
+int pos_state = strategy.position_size > 0 ? 1 : (strategy.position_size < 0 ? -1 : 0)
+
+// Can Buy/Sell filters based on position size to prevent duplicate alerts
+bool can_buy = strategy.position_size <= 0
+bool can_sell = strategy.position_size >= 0
+
+// Trigger Alerts
+if buy_now and can_buy
+    string msg = "RELIANCE BUY SCALP: Place Trade Now! " + (htf_bullish and use_htf_filter ? "(1H Bullish Trend - HOLD LONGER)" : "(Quick Scalp Only)")
+    alert(msg, alert.freq_once_per_bar_close)
+
+if sell_now and can_sell
+    alert("RELIANCE SELL SCALP: Place Trade Now! (Quick Scalp)", alert.freq_once_per_bar_close)
+
+if trapped_buyers
+    alert("RELIANCE ORDERFLOW: Trapped Buyers detected! Reversal imminent.", alert.freq_once_per_bar_close)
+
+if trapped_sellers
+    alert("RELIANCE ORDERFLOW: Trapped Sellers detected! Reversal imminent.", alert.freq_once_per_bar_close)
+
+if trigger_exit_long
+    alert("RELIANCE EXIT LONG: " + exit_reason, alert.freq_once_per_bar_close)
+
+if trigger_exit_short
+    alert("RELIANCE EXIT SHORT: " + exit_reason, alert.freq_once_per_bar_close)
+
+// ==========================================
+// 7. REAL-TIME FOOTPRINT & SIGNAL DASHBOARD
+// ==========================================
+
+var table dashboard = table.new(position.top_right, 4, show_footprint ? 25 : 7, bgcolor=color.new(color.black, 20), border_color=color.gray, border_width=1)
+
+format_vol(val) =>
+    val >= 1000000 ? str.tostring(val / 1000000.0, "#.##") + "M" : (val >= 1000 ? str.tostring(val / 1000.0, "#.#") + "K" : str.tostring(val, "#"))
+
+if show_dashboard and barstate.islast
+    // Clear and redraw dashboard headers
+    table.cell(dashboard, 0, 0, "RELIANCE ORDER FLOW COMPOSITE", text_color=color.white, text_size=size.small, bgcolor=color.new(color.navy, 10))
+    table.merge_cells(dashboard, 0, 0, 3, 0)
+    
+    // Row 1: Columns headers
+    table.cell(dashboard, 0, 1, "Metric/Level", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(dashboard, 1, 1, "Value / Bid", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(dashboard, 2, 1, "Status / Ask", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 30))
+    table.cell(dashboard, 3, 1, "Recommendation / Delta", text_color=color.gray, text_size=size.small, bgcolor=color.new(color.black, 30))
+    
+    // 1H Trend (5/20 EMA Crossover)
+    color trend_color = htf_bullish ? color.rgb(46, 204, 113) : color.rgb(231, 76, 60)
+    string trend_text = htf_bullish ? "BULLISH (5 > 20)" : "BEARISH (5 < 20)"
+    string trend_val_str = str.tostring(htf_ema_fast, "#.##") + " / " + str.tostring(htf_ema_slow, "#.##")
+    table.cell(dashboard, 0, 2, "1H Trend (5/20 EMA)", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 2, trend_val_str, text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 2, 2, trend_text, text_color=color.white, text_size=size.small, bgcolor=trend_color)
+    table.cell(dashboard, 3, 2, htf_bullish ? "Hold Longs / Buy Only" : "Hold Shorts / Sell Only", text_color=color.white, text_size=size.small)
+    
+    // CVD Delta Status
+    color cvd_color = cvd >= cvd_ema ? color.rgb(46, 204, 113) : color.rgb(231, 76, 60)
+    table.cell(dashboard, 0, 3, "CVD Delta vs EMA", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 3, format_vol(cvd), text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 2, 3, cvd >= cvd_ema ? "MOMENTUM UP" : "MOMENTUM DOWN", text_color=color.white, text_size=size.small, bgcolor=cvd_color)
+    table.cell(dashboard, 3, 3, format_vol(cvd - cvd_ema), text_color=cvd_color, text_size=size.small)
+    
+    // Range Location
+    table.cell(dashboard, 0, 4, "Range Location", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 4, range_loc, text_color=color.white, text_size=size.small, bgcolor=range_loc_color)
+    table.cell(dashboard, 2, 4, range_bias, text_color=color.white, text_size=size.small, bgcolor=range_bias_color)
+    table.cell(dashboard, 3, 4, proximity_detail, text_color=color.white, text_size=size.small)
+    
+    // New Pivot Alert
+    table.cell(dashboard, 0, 5, "New Range Alert", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 5, pivot_alert_val, text_color=color.white, text_size=size.small, bgcolor=pivot_alert_bg)
+    table.cell(dashboard, 2, 5, pivot_alert_status, text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 3, 5, pivot_alert_detail, text_color=color.white, text_size=size.small)
+    
+    // Trading Recommendation (Traffic Signal)
+    color rec_bg = color.gray
+    string rec_text = "⚪ NEUTRAL (HOLD)"
+    color rec_text_color = color.white
+    string rec_detail = "-"
+    
+    if trigger_exit_long
+        rec_bg := color.orange
+        rec_text := "🟠 EXIT LONG"
+        rec_detail := exit_reason
+    else if trigger_exit_short
+        rec_bg := color.orange
+        rec_text := "🟠 EXIT SHORT"
+        rec_detail := exit_reason
+    else if buy_now and can_buy
+        rec_bg := color.green
+        rec_text := "🟢 GO LONG (BUY)"
+        rec_detail := "Target: " + str.tostring(tp_p, "#.##") + " | SL: " + str.tostring(sl_p, "#.##")
+    else if sell_now and can_sell
+        rec_bg := color.red
+        rec_text := "🔴 GO SHORT (SELL)"
+        rec_detail := "Target: " + str.tostring(tp_p, "#.##") + " | SL: " + str.tostring(sl_p, "#.##")
+    else if pos_state == 1
+        rec_bg := color.navy
+        rec_text := "🔵 HOLD LONG"
+        rec_detail := "TP: " + str.tostring(tp_p, "#.##") + " | SL: " + str.tostring(sl_p, "#.##")
+    else if pos_state == -1
+        rec_bg := color.navy
+        rec_text := "🔵 HOLD SHORT"
+        rec_detail := "TP: " + str.tostring(tp_p, "#.##") + " | SL: " + str.tostring(sl_p, "#.##")
+    else if prepare_buy
+        rec_bg := color.rgb(243, 156, 18)
+        rec_text := "🟡 PREPARE LONG"
+        rec_text_color := color.white
+        rec_detail := "Near P Low/Support"
+    else if prepare_sell
+        rec_bg := color.rgb(243, 156, 18)
+        rec_text := "🟡 PREPARE SHORT"
+        rec_text_color := color.white
+        rec_detail := "Near P High/Resistance"
+        
+    table.cell(dashboard, 0, 6, "Traffic Signal", text_color=color.white, text_size=size.small)
+    table.cell(dashboard, 1, 6, rec_text, text_color=rec_text_color, text_size=size.small, bgcolor=rec_bg)
+    table.merge_cells(dashboard, 1, 6, 2, 6)
+    table.cell(dashboard, 3, 6, rec_detail, text_color=color.white, text_size=size.small)
+
+    if show_footprint
+        // Divider
+        table.cell(dashboard, 0, 7, "REAL-TIME FOOTPRINT (ACTIVE BAR)", text_color=color.white, text_size=size.small, bgcolor=color.new(color.teal, 30))
+        table.merge_cells(dashboard, 0, 7, 3, 7)
+        
+        // Populate footprint cells
+        int f_rows = array.size(row_prices)
+        if f_rows > 0
+            // We show maximum 10 levels centered around close to fit the dashboard
+            int close_idx = 0
+            float min_dist = 999999.0
+            for idx = 0 to f_rows - 1
+                float dist = math.abs(array.get(row_prices, idx) - close)
+                if dist < min_dist
+                    min_dist := dist
+                    close_idx := idx
+                    
+            int start_r = math.max(0, close_idx - 5)
+            int end_r = math.min(f_rows - 1, close_idx + 5)
+            
+            int cell_row = 8
+            for r = end_r to start_r
+                float p_level = array.get(row_prices, r)
+                float bv = array.get(row_buy_vols, r)
+                float sv = array.get(row_sell_vols, r)
+                float delta_r = bv - sv
+                
+                color delta_color = delta_r >= 0.0 ? color.green : color.red
+                bool is_at_close = (r == close_idx)
+                color row_bg = is_at_close ? color.new(color.yellow, 80) : color.new(color.black, 40)
+                
+                table.cell(dashboard, 0, cell_row, str.tostring(p_level, "#.00"), text_color=color.white, text_size=size.small, bgcolor=row_bg)
+                table.cell(dashboard, 1, cell_row, format_vol(bv), text_color=color.green, text_size=size.small, bgcolor=row_bg)
+                table.cell(dashboard, 2, cell_row, format_vol(sv), text_color=color.red, text_size=size.small, bgcolor=row_bg)
+                table.cell(dashboard, 3, cell_row, format_vol(delta_r), text_color=delta_color, text_size=size.small, bgcolor=color.new(delta_color, 85))
+                
+                cell_row += 1
+                
+            // Clear remaining dashboard cells if any from previous calculations
+            if cell_row < 24
+                for empty_row = cell_row to 24
+                    table.cell(dashboard, 0, empty_row, "", bgcolor=color.new(color.black, 100))
+                    table.cell(dashboard, 1, empty_row, "", bgcolor=color.new(color.black, 100))
+                    table.cell(dashboard, 2, empty_row, "", bgcolor=color.new(color.black, 100))
+                    table.cell(dashboard, 3, empty_row, "", bgcolor=color.new(color.black, 100))

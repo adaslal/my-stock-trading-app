@@ -1,0 +1,211 @@
+import type { Candle } from './pavpEngine';
+
+export interface WatchlistItem {
+  ticker: string;
+  name: string;
+  basePrice: number;
+  volatility: number;
+  trend: 'up' | 'flat' | 'squeeze' | 'trap' | 'explosive';
+  capSize: 'large' | 'mid' | 'small';
+}
+
+export const INDIAN_WATCHLIST: WatchlistItem[] = [
+  // Small Caps
+  { ticker: 'RAMCOSYS.NS', name: 'Ramco Systems Limited', basePrice: 469.90, volatility: 0.038, trend: 'squeeze', capSize: 'small' },
+  { ticker: 'SPARC.NS', name: 'Sun Pharma Advanced Research', basePrice: 209.80, volatility: 0.042, trend: 'up', capSize: 'small' },
+  { ticker: 'GENESYS.NS', name: 'Genesys International Corporation', basePrice: 377.40, volatility: 0.036, trend: 'squeeze', capSize: 'small' },
+  { ticker: 'LAXMIDNT.NS', name: 'Laxmi Dental Limited', basePrice: 249.30, volatility: 0.045, trend: 'up', capSize: 'small' },
+  { ticker: 'KPIGREEN.NS', name: 'KPI Green Energy Limited', basePrice: 1850, volatility: 0.045, trend: 'explosive', capSize: 'small' },
+  { ticker: 'ZENTEC.NS', name: 'Zen Technologies Limited', basePrice: 1050, volatility: 0.040, trend: 'squeeze', capSize: 'small' },
+
+  // Mid Caps
+  { ticker: 'VRLLOG.NS', name: 'VRL Logistics Limited', basePrice: 242, volatility: 0.022, trend: 'trap', capSize: 'mid' },
+  { ticker: 'RVNL.NS', name: 'Rail Vikas Nigam Limited', basePrice: 380, volatility: 0.035, trend: 'up', capSize: 'mid' },
+  { ticker: 'JIOFIN.NS', name: 'Jio Financial Services Limited', basePrice: 355, volatility: 0.020, trend: 'squeeze', capSize: 'mid' },
+  { ticker: 'IREDA.NS', name: 'Indian Renewable Energy Dev Agency', basePrice: 185, volatility: 0.038, trend: 'up', capSize: 'mid' },
+  { ticker: 'LTIM.NS', name: 'LTIMindtree Limited', basePrice: 4800, volatility: 0.018, trend: 'squeeze', capSize: 'mid' },
+  { ticker: 'SUZLON.NS', name: 'Suzlon Energy Limited', basePrice: 48.50, volatility: 0.042, trend: 'explosive', capSize: 'mid' },
+  { ticker: 'SJVN.NS', name: 'SJVN Limited', basePrice: 130, volatility: 0.038, trend: 'squeeze', capSize: 'mid' },
+  { ticker: 'HUDCO.NS', name: 'Housing & Urban Development Corp', basePrice: 280, volatility: 0.035, trend: 'up', capSize: 'mid' },
+
+  // Large Caps
+  { ticker: 'TATAMOTORS.NS', name: 'Tata Motors Limited', basePrice: 940, volatility: 0.018, trend: 'squeeze', capSize: 'large' },
+  { ticker: 'RELIANCE.NS', name: 'Reliance Industries Limited', basePrice: 2850, volatility: 0.011, trend: 'up', capSize: 'large' },
+  { ticker: 'HAL.NS', name: 'Hindustan Aeronautics Limited', basePrice: 4200, volatility: 0.019, trend: 'explosive', capSize: 'large' },
+  { ticker: 'BEL.NS', name: 'Bharat Electronics Limited', basePrice: 260, volatility: 0.022, trend: 'squeeze', capSize: 'large' },
+  { ticker: 'ZOMATO.NS', name: 'Zomato Limited', basePrice: 195, volatility: 0.028, trend: 'up', capSize: 'large' },
+  { ticker: 'SBIN.NS', name: 'State Bank of India', basePrice: 810, volatility: 0.014, trend: 'flat', capSize: 'large' },
+  { ticker: 'HDFCBANK.NS', name: 'HDFC Bank Limited', basePrice: 1520, volatility: 0.012, trend: 'flat', capSize: 'large' },
+  { ticker: 'TCS.NS', name: 'Tata Consultancy Services Limited', basePrice: 3850, volatility: 0.012, trend: 'flat', capSize: 'large' },
+  { ticker: 'INFY.NS', name: 'Infosys Limited', basePrice: 1530, volatility: 0.015, trend: 'squeeze', capSize: 'large' },
+  { ticker: 'ICICIBANK.NS', name: 'ICICI Bank Limited', basePrice: 1110, volatility: 0.013, trend: 'up', capSize: 'large' },
+  { ticker: 'BHARTIARTL.NS', name: 'Bharti Airtel Limited', basePrice: 1380, volatility: 0.015, trend: 'up', capSize: 'large' },
+  { ticker: 'ITC.NS', name: 'ITC Limited', basePrice: 430, volatility: 0.011, trend: 'flat', capSize: 'large' },
+  { ticker: 'AXISBANK.NS', name: 'Axis Bank Limited', basePrice: 1150, volatility: 0.014, trend: 'up', capSize: 'large' },
+  { ticker: 'KOTAKBANK.NS', name: 'Kotak Mahindra Bank Limited', basePrice: 1720, volatility: 0.013, trend: 'flat', capSize: 'large' },
+  { ticker: 'LT.NS', name: 'Larsen & Toubro Limited', basePrice: 3450, volatility: 0.014, trend: 'up', capSize: 'large' },
+  { ticker: 'TATASTEEL.NS', name: 'Tata Steel Limited', basePrice: 165, volatility: 0.022, trend: 'squeeze', capSize: 'large' },
+  { ticker: 'M&M.NS', name: 'Mahindra & Mahindra Limited', basePrice: 2500, volatility: 0.018, trend: 'up', capSize: 'large' },
+  { ticker: 'HINDUNILVR.NS', name: 'Hindustan Unilever Limited', basePrice: 2450, volatility: 0.010, trend: 'flat', capSize: 'large' }
+];
+
+export const NIFTY_TICKERS = [
+  'RELIANCE.NS', 'TCS.NS', 'INFY.NS', 'HDFCBANK.NS', 'ICICIBANK.NS',
+  'SBIN.NS', 'BHARTIARTL.NS', 'ITC.NS', 'LTIM.NS', 'AXISBANK.NS',
+  'KOTAKBANK.NS', 'LT.NS', 'TATASTEEL.NS', 'M&M.NS', 'HINDUNILVR.NS'
+];
+
+
+
+export function generateHistoricalData(item: WatchlistItem, count: number = 250): Candle[] {
+  const candles: Candle[] = [];
+  const now = new Date();
+  
+  let currentPrice = item.basePrice;
+  let volumeBase = 1500000;
+  
+  if (item.ticker === 'VRLLOG.NS') volumeBase = 800000;
+  if (item.ticker === 'RVNL.NS') volumeBase = 4000000;
+  if (item.ticker === 'RAMCOSYS.NS') volumeBase = 2500000;
+  if (item.ticker === 'SPARC.NS') volumeBase = 32000000;
+  if (item.ticker === 'GENESYS.NS') volumeBase = 12000000;
+  if (item.ticker === 'LAXMIDNT.NS') volumeBase = 3500000;
+
+  for (let i = count - 1; i >= 0; i--) {
+    const candleDate = new Date(now);
+    candleDate.setDate(now.getDate() - i);
+    
+    // Skip weekends
+    const day = candleDate.getDay();
+    if (day === 0 || day === 6) continue;
+
+    const timeString = candleDate.toISOString().split('T')[0];
+
+    // Determine path based on trend preset
+    let priceChangePercent = (Math.random() - 0.5) * item.volatility;
+
+    // Apply macro paths
+    if (item.trend === 'up') {
+      // General strong uptrend: 200 SMA is far below, price rises slowly
+      priceChangePercent += 0.0015; // upward bias
+      
+      // Add occasional minor pullbacks
+      if (i > 40 && i < 60) priceChangePercent -= 0.003;
+      if (i > 160 && i < 185) priceChangePercent -= 0.004;
+    } else if (item.trend === 'squeeze') {
+      // Period of strong uptrend, followed by an extremely narrow range (volatility squeeze)
+      const isSqueezeZone = i < 25; // Squeeze is active in the last 25 candles
+      
+      if (!isSqueezeZone) {
+        priceChangePercent += 0.0018; // strong historical uptrend
+        if (i > 70 && i < 100) priceChangePercent -= 0.003; // standard pullback
+      } else {
+        // Tight consolidation zone (coiling energy)
+        priceChangePercent = (Math.random() - 0.5) * (item.volatility * 0.35); // volatility shrinks to 35% of normal!
+        // Pull down slightly onto VAL line support
+        priceChangePercent -= 0.0002; 
+      }
+    } else if (item.trend === 'explosive') {
+      // Historical strong uptrend, then tight consolidation right below the high
+      if (i > 15) {
+        priceChangePercent += 0.0018; // strong historical uptrend
+        if (i > 70 && i < 100) priceChangePercent -= 0.003; // standard pullback
+      } else {
+        // Tight consolidation right below the high
+        priceChangePercent = (Math.random() - 0.5) * (item.volatility * 0.3); // very tight range
+        priceChangePercent -= 0.0001; // stable/consolidating
+      }
+    } else if (item.trend === 'trap') {
+      // The VRLLOG Trap Setup:
+      // - Standard downtrend/consolidation.
+      // - Pulls back into VAL support at i = 4
+      // - Bounces strongly at i = 3 (looks like a perfect hammer candle!)
+      // - Breaks down and collapses at i = 2, 1, 0!
+      if (i > 45) {
+        priceChangePercent -= 0.001; // steady decline
+      } else if (i <= 45 && i > 5) {
+        priceChangePercent -= 0.0035; // aggressive pullback towards p low
+      } else if (i === 4) {
+        // Touches VAL price
+        currentPrice = item.basePrice * 0.99; 
+        priceChangePercent = -0.008; // down touch
+      } else if (i === 3) {
+        // Tempting bounce candle! Strong green hammer
+        priceChangePercent = +0.024; // strong 2.4% bounce!
+      } else if (i === 2) {
+        // The Trap Fires!
+        priceChangePercent = -0.035; // sharp 3.5% sell off, breaking VAL
+      } else if (i === 1) {
+        priceChangePercent = -0.015;
+      } else if (i === 0) {
+        priceChangePercent = -0.012; // closed at low
+      }
+    } else {
+      // Flat range consolidation
+      if (i > 100 && i < 150) priceChangePercent += 0.002;
+      if (i <= 100 && i > 50) priceChangePercent -= 0.002;
+    }
+
+    // Calculate OHLC
+    let open = currentPrice;
+    let close = currentPrice * (1 + priceChangePercent);
+    
+    // Safety caps
+    if (close < 5) close = 5;
+
+    let high = Math.max(open, close) * (1 + Math.random() * (item.volatility * 0.5));
+    let low = Math.min(open, close) * (1 - Math.random() * (item.volatility * 0.5));
+
+    // Handle high fidelity hammer formatting for the VRLLOG bounce candle at index 3
+    if (item.trend === 'trap' && i === 3) {
+      // Hammer: open at bottom, closed at top, long tail below
+      const basePrice = currentPrice * 0.985;
+      close = basePrice * 1.024;
+      high = close * 1.002;
+      low = basePrice * 0.965; // long wick below
+    }
+
+    if (item.trend === 'explosive' && i === 0) {
+      // Find the maximum high in previously generated candles to place close between VAH and highestPrice
+      const maxHigh = candles.length > 0 ? Math.max(...candles.map(c => c.high)) : currentPrice;
+      
+      // Override today's candle to be a fuchsia arrow candle (bullish absorption)
+      // and close lies between VAH and Profile High (approx 98.2% of maxHigh)
+      close = maxHigh * 0.982;
+      open = maxHigh * 0.970;
+      high = maxHigh * 0.988;
+      low = maxHigh * 0.948; // long tail below (sellers absorbed)
+    }
+
+    // Volume Calculations (VDU setup)
+    let volume = volumeBase * (0.6 + Math.random() * 0.8);
+    
+    // If we are in the last 3 days of a squeeze, dry up volume significantly (VDU)
+    if (item.trend === 'squeeze' && i < 4) {
+      volume = volumeBase * (0.28 + Math.random() * 0.15); // Volume shrinks to just 35% of regular volume!
+    }
+    // High volume on the VRLLOG trap day (distribution)
+    if (item.trend === 'trap' && i === 2) {
+      volume = volumeBase * 2.2; // massive selling volume
+    }
+
+    const candle: Candle = {
+      time: timeString,
+      open: parseFloat(open.toFixed(2)),
+      high: parseFloat(high.toFixed(2)),
+      low: parseFloat(low.toFixed(2)),
+      close: parseFloat(close.toFixed(2)),
+      volume: Math.floor(volume)
+    };
+
+    if (item.trend === 'explosive' && i === 0) {
+      candle.barDelta = -Math.floor(volume * 1.5);
+    }
+
+    candles.push(candle);
+
+    currentPrice = close;
+  }
+
+  return candles;
+}
