@@ -582,6 +582,10 @@ plotshape(prepare_sell and not sell_now, title="PREPARE SHORT", style=shape.arro
      color=color.yellow, size=size.small)
 
 // Trapped Traders Reversals (Absorption - combined footprint and CVD absorption)
+// NOTE: these fire near SUPPORT (bullish) / RESISTANCE (bearish) by design -- they are
+// "bounce off the range boundary" reversal signals. They can never appear when price is
+// sitting between VAH and P High (near the top but not within level_proximity of it),
+// which is a different setup -- see vah_phigh_bull_confirm below for that case.
 bool absorption_bearish = trapped_buyers or cvd_bearish_absorption
 bool absorption_bullish = trapped_sellers or cvd_bullish_absorption
 
@@ -589,6 +593,19 @@ plotshape(absorption_bearish, title="ABSORPTION BEARISH", style=shape.arrowdown,
      color=color.fuchsia, size=size.small)
 plotshape(absorption_bullish, title="ABSORPTION BULLISH", style=shape.arrowup, location=location.belowbar,
      color=color.fuchsia, size=size.small)
+
+// VAH -> P High Breakout Confirmation (separate from the support/resistance reversal arrows above).
+// Fires when the close sits inside the true Value-Area-High-to-Profile-High zone AND the same
+// bullish CVD absorption divergence is present, with NO near_support/near_resistance gate --
+// this is the "price between VAH and P High, confirmed by an upward bullish-absorption signal"
+// setup, matching nifty_range_screener.pine's arrow_confirmed logic and the AEGIS PAVP screener's
+// isExplosiveSetup() check in App.tsx.
+bool in_vah_phigh_zone = not na(vah_price_hist) and not na(p_high_hist) and close > vah_price_hist and close < p_high_hist
+bool vah_phigh_bull_confirm = in_vah_phigh_zone and bar_delta < -avg_abs_delta * absorption_mult and close > (high + low) / 2.0
+
+plotshape(vah_phigh_bull_confirm, title="VAH-P HIGH BULL CONFIRM", style=shape.triangleup, location=location.belowbar,
+     color=color.aqua, size=size.small, text="VAH▲")
+alertcondition(vah_phigh_bull_confirm, title="VAH->P High Bullish Confirm", message="{{ticker}}: price between VAH and P High with bullish absorption confirmation")
 
 // ==========================================
 // 6.5 DYNAMIC TRADE STATE TRACKER & TARGETS
