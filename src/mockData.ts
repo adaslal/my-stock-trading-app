@@ -120,29 +120,14 @@ export function generateHistoricalData(item: WatchlistItem, count: number = 250)
         priceChangePercent -= 0.0001; // stable/consolidating
       }
     } else if (item.trend === 'trap') {
-      // The VRLLOG Trap Setup:
-      // - Standard downtrend/consolidation.
-      // - Pulls back into VAL support at i = 4
-      // - Bounces strongly at i = 3 (looks like a perfect hammer candle!)
-      // - Breaks down and collapses at i = 2, 1, 0!
+      // The VRLLOG Trap Setup: standard downtrend/consolidation into support. The final
+      // 5 trading days are overwritten below (after this loop) with a scripted multi-day
+      // bearish absorption + breakdown pattern -- done as a post-process over the last 5
+      // *array* entries (not raw loop index i), mirroring the 'explosive' design.
       if (i > 45) {
         priceChangePercent -= 0.001; // steady decline
       } else if (i <= 45 && i > 5) {
         priceChangePercent -= 0.0035; // aggressive pullback towards p low
-      } else if (i === 4) {
-        // Touches VAL price
-        currentPrice = item.basePrice * 0.99; 
-        priceChangePercent = -0.008; // down touch
-      } else if (i === 3) {
-        // Tempting bounce candle! Strong green hammer
-        priceChangePercent = +0.024; // strong 2.4% bounce!
-      } else if (i === 2) {
-        // The Trap Fires!
-        priceChangePercent = -0.035; // sharp 3.5% sell off, breaking VAL
-      } else if (i === 1) {
-        priceChangePercent = -0.015;
-      } else if (i === 0) {
-        priceChangePercent = -0.012; // closed at low
       }
     } else {
       // Flat range consolidation
@@ -157,17 +142,8 @@ export function generateHistoricalData(item: WatchlistItem, count: number = 250)
     // Safety caps
     if (close < 5) close = 5;
 
-    let high = Math.max(open, close) * (1 + Math.random() * (item.volatility * 0.5));
-    let low = Math.min(open, close) * (1 - Math.random() * (item.volatility * 0.5));
-
-    // Handle high fidelity hammer formatting for the VRLLOG bounce candle at index 3
-    if (item.trend === 'trap' && i === 3) {
-      // Hammer: open at bottom, closed at top, long tail below
-      const basePrice = currentPrice * 0.985;
-      close = basePrice * 1.024;
-      high = close * 1.002;
-      low = basePrice * 0.965; // long wick below
-    }
+    const high = Math.max(open, close) * (1 + Math.random() * (item.volatility * 0.5));
+    const low = Math.min(open, close) * (1 - Math.random() * (item.volatility * 0.5));
 
     // Volume Calculations (VDU setup)
     let volume = volumeBase * (0.6 + Math.random() * 0.8);
@@ -176,11 +152,6 @@ export function generateHistoricalData(item: WatchlistItem, count: number = 250)
     if (item.trend === 'squeeze' && i < 4) {
       volume = volumeBase * (0.28 + Math.random() * 0.15); // Volume shrinks to just 35% of regular volume!
     }
-    // High volume on the VRLLOG trap day (distribution)
-    if (item.trend === 'trap' && i === 2) {
-      volume = volumeBase * 2.2; // massive selling volume
-    }
-
     const candle: Candle = {
       time: timeString,
       open: parseFloat(open.toFixed(2)),
@@ -268,6 +239,80 @@ export function generateHistoricalData(item: WatchlistItem, count: number = 250)
     // value area), and shrinking the cap would push close back below VAH in that case.
     breakoutClose = Math.min(Math.max(breakoutClose, breakoutLow * 1.01), breakoutHigh);
     candles[lastIdx].close = parseFloat(breakoutClose.toFixed(2));
+  }
+
+  // Post-process: overwrite the last 5 *array* entries for the 'trap' demo trend with a
+  // genuine multi-day bearish absorption pattern -- 4 days of heavy net buying (each day's
+  // close pinned near its own high) absorbed on a gentle staircase-down in price/level,
+  // followed by a breakdown candle that closes inside the [Profile Low, VAL] zone. Mirrors
+  // the 'explosive' design exactly, flipped: buyers keep defending a failing level, then
+  // sellers finally overwhelm them (the actual "trap").
+  if (item.trend === 'trap' && candles.length >= 10) {
+    const cutIndex = candles.length - 5;
+    const anchorPrice = candles[cutIndex - 1].close;
+
+    // 4 days of heavy net buying absorbed: opens near the day's low, rallies hard intraday,
+    // closes pinned near the day's own high (deep positive delta proxy) -- yet the day's
+    // level itself ratchets gently downward day over day, so price keeps grinding lower
+    // despite the buying (trapped buyers defending a failing level).
+    for (let t = 0; t < 4; t++) {
+      const idx = cutIndex + t;
+      const levelBase = anchorPrice * (1 - 0.004 * t);
+      const dayLow = levelBase * 0.990;
+      const dayHigh = levelBase * 1.008;
+      const dayClose = dayHigh - (dayHigh - dayLow) * 0.12; // top 12% of the day's range
+      const dayOpen = dayLow * 1.003;
+      candles[idx] = {
+        ...candles[idx],
+        open: parseFloat(dayOpen.toFixed(2)),
+        high: parseFloat(dayHigh.toFixed(2)),
+        low: parseFloat(dayLow.toFixed(2)),
+        close: parseFloat(dayClose.toFixed(2)),
+        volume: Math.floor(volumeBase * 1.9)
+      };
+    }
+
+    // The volume-profile binning (and therefore VAL / Profile Low) depends only on each
+    // bar's high/low/volume -- never its close. So fix this breakdown bar's high/low/volume
+    // first, run calculatePAVP ONCE to read the real settled VAL/Profile Low including this
+    // bar's contribution, then place close inside that zone with no feedback loop / guessing.
+    const lastIdx2 = candles.length - 1;
+    const preBreakdownCandles = candles.slice(0, cutIndex + 4);
+    const histLow = Math.min(...preBreakdownCandles.map(c => c.low));
+    // Set slightly *below* the prior trough so this breakdown bar deterministically becomes
+    // the new Profile Low itself -- VAL is always >= Profile Low by construction, so
+    // anchoring lowestPrice to this bar's own low guarantees there is always room to place a
+    // valid close between Profile Low and VAL.
+    const breakdownLow = histLow * 0.999;
+    const breakdownHigh = histLow * 1.06; // long tail above (buyers absorbed)
+    const breakdownVolume = Math.floor(volumeBase * (0.6 + Math.random() * 0.8) * 1.3);
+
+    candles[lastIdx2] = {
+      ...candles[lastIdx2],
+      open: parseFloat((breakdownLow * 1.01).toFixed(2)),
+      high: parseFloat(breakdownHigh.toFixed(2)),
+      low: parseFloat(breakdownLow.toFixed(2)),
+      close: parseFloat(((breakdownHigh + breakdownLow) / 2).toFixed(2)), // placeholder, set below
+      volume: breakdownVolume
+    };
+
+    const settled2 = calculatePAVP(candles);
+    const svp2 = settled2.volumeProfile;
+    const targetLowestPrice = svp2 ? svp2.lowestPrice : breakdownLow;
+    const targetVal = svp2 ? svp2.val : breakdownLow * 1.03;
+
+    let breakdownClose = targetLowestPrice + (targetVal - targetLowestPrice) * 0.5;
+    // Also cap it just below the absorption window's starting close (candles[cutIndex]) so
+    // the 5-day price return used by the absorption formula stays non-positive regardless of
+    // where VAL/Profile Low land -- the whole point of the pattern is price holding/falling
+    // despite the heavy buying earlier in the window.
+    const windowStartClose2 = candles[cutIndex].close;
+    breakdownClose = Math.min(breakdownClose, windowStartClose2 * 0.999);
+    // Bound is this bar's own [low, high] -- no asymmetric shrink, since VAL sometimes lands
+    // exactly at Profile Low (a fully one-sided value area) and shrinking would push close
+    // back above VAL in that case.
+    breakdownClose = Math.max(Math.min(breakdownClose, breakdownHigh), breakdownLow);
+    candles[lastIdx2].close = parseFloat(breakdownClose.toFixed(2));
   }
 
   return candles;
