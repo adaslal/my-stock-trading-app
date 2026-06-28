@@ -270,25 +270,49 @@ export function calculatePAVP(candles: Candle[], pvtLength: number = 20, numProf
   const latestVolume = vols[n - 1] || 0;
   const isVolumeSpiked = latestVolume > volumeSma20 * 1.618; // Surges above 1.618x Volume SMA!
 
-  // Calculate price-action volume delta to determine CVD bullish absorption (upward fuchsia arrow)
+  // Calculate price-action volume delta (single-bar proxy for order flow -- no real intrabar
+  // tick data is available from daily OHLCV, so each bar's net buy/sell pressure is estimated
+  // from where its close landed within its own high-low range).
   const deltas = candles.map(c => {
     if (c.barDelta !== undefined) return c.barDelta;
     const range = c.high - c.low;
     const buyPct = range > 0 ? (c.close - c.low) / range : 0.5;
     return c.volume * (2.0 * buyPct - 1.0);
   });
-  const absDeltas = deltas.map(d => Math.abs(d));
-  const avgAbsDelta = getSMA(absDeltas, 20);
-  const latestDelta = deltas[n - 1] || 0;
-  const latestCandle = candles[n - 1] || { close: 0, high: 0, low: 0 };
-  
-  // Bullish CVD Absorption: Significant sell delta, but close in the upper half of the bar (lower wick).
-  // absorptionMult defaults to 1.5 to match reliance_scalping_composite.pine / reliance_scalping_strategy.pine / scan_real_market.py -- change all together.
-  const isBullishAbsorption = latestDelta < -avgAbsDelta * absorptionMult && latestCandle.close > (latestCandle.high + latestCandle.low) / 2.0;
 
-  // Bearish CVD Absorption: Significant buy delta, but close in the lower half of the bar (upper wick) -- trapped buyers.
-  // Mirrors isBullishAbsorption; keep absorptionMult in sync across the same files listed above.
-  const isBearishAbsorption = latestDelta > avgAbsDelta * absorptionMult && latestCandle.close < (latestCandle.high + latestCandle.low) / 2.0;
+  // CVD Absorption (multi-day divergence). NOTE: a single bar's delta and "close vs. its own
+  // midpoint" are mathematically the SAME signal (close > midpoint <=> buyPct > 0.5 <=> delta > 0),
+  // so a same-bar check (delta very negative AND close > midpoint) can never be true -- confirmed
+  // via backtest_explosive_signal.py returning zero real-data matches across 132k signal-days.
+  // Absorption instead compares NET ORDER FLOW over a recent window against the PRICE OUTCOME
+  // over that same window -- two independent quantities. A stock can see heavy net selling
+  // (negative cumulative delta) over several days while price still holds flat or rises
+  // (trapped sellers / absorption), or heavy net buying while price holds flat or falls
+  // (trapped buyers). absorptionMult defaults to 1.5 to match reliance_scalping_composite.pine /
+  // reliance_scalping_strategy.pine / scan_real_market.py -- change all together.
+  const ABSORPTION_WINDOW = 5;     // trading days of order-flow + price action compared
+  const ABSORPTION_BASELINE = 20;  // trading days used to normalize "how big is big" for cumDelta
+
+  const cumDeltaSeries = deltas.map((_, i) => {
+    const start = Math.max(0, i - ABSORPTION_WINDOW + 1);
+    let sum = 0;
+    for (let j = start; j <= i; j++) sum += deltas[j];
+    return sum;
+  });
+  const absCumDeltaSeries = cumDeltaSeries.map(d => Math.abs(d));
+  const avgAbsCumDelta = getSMA(absCumDeltaSeries, ABSORPTION_BASELINE);
+
+  const latestCumDelta = cumDeltaSeries[n - 1] || 0;
+  const windowStartClose = closes[Math.max(0, n - ABSORPTION_WINDOW)] ?? lastClose;
+  const latestPriceRet = windowStartClose > 0 ? (lastClose / windowStartClose) - 1.0 : 0;
+
+  // Bullish CVD Absorption: heavy net SELLING over the last few bars, but price still held
+  // flat or rose over that same stretch -- sellers got absorbed instead of pushing price down.
+  const isBullishAbsorption = latestCumDelta < -avgAbsCumDelta * absorptionMult && latestPriceRet >= 0;
+
+  // Bearish CVD Absorption: heavy net BUYING over the last few bars, but price still held
+  // flat or fell over that same stretch -- buyers got absorbed instead of pushing price up.
+  const isBearishAbsorption = latestCumDelta > avgAbsCumDelta * absorptionMult && latestPriceRet <= 0;
 
 
   // 6. Setup Rating Calculations

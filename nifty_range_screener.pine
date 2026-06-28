@@ -31,8 +31,8 @@ level_proximity = input.float(0.3, "Level Proximity Buffer (%)", minval=0.01, ma
      tooltip="Proximity threshold to mark support/resistance alerts (as a percentage of price).")
 
 group_arrow = "PAVP Zone Confirmation Settings (Bull & Bear)"
-absorption_mult = input.float(1.5, "Absorption Sensitivity (x Avg Abs Delta)", minval=0.5, maxval=5.0, group=group_arrow,
-     tooltip="Lower = more signals, less selective. This uses a single-bar OHLCV delta proxy (no intrabar data), the same formula as pavpEngine.ts in your web app, so it can run across the whole watchlist at once. It is not the true intrabar CVD used in reliance_scalping_composite.pine.")
+absorption_mult = input.float(1.5, "Absorption Sensitivity (x Avg Abs Cumulative Delta)", minval=0.5, maxval=5.0, group=group_arrow,
+     tooltip="Lower = more signals, less selective. Compares net order-flow over the last few bars (cumulative single-bar OHLCV delta proxy, no intrabar data) against price's own move over that same stretch -- the same multi-day formula as pavpEngine.ts in your web app, so it can run across the whole watchlist at once. It is not the true intrabar CVD used in reliance_scalping_composite.pine.")
 
 group_style = "Dashboard Style Settings"
 table_pos = input.string("top_right", "Table Position", options=["top_right", "top_left", "bottom_right", "bottom_left"], group=group_style)
@@ -149,16 +149,31 @@ calc_pavp_levels(p_left, p_right, n_levels, va_pct, abs_mult) =>
     float bar_range = math.max(high - low, 0.000001)
     float buy_pct = (close - low) / bar_range
     float bar_delta_proxy = volume * (2.0 * buy_pct - 1.0)
-    float avg_abs_delta_proxy = ta.sma(math.abs(bar_delta_proxy), 20)
+
+    // CVD Absorption (multi-day divergence). NOTE: a single bar's delta and "close vs. its
+    // own midpoint" are mathematically the SAME signal (close > midpoint <=> buyPct > 0.5 <=>
+    // delta > 0), so a same-bar check (delta very negative AND close > midpoint) can never be
+    // true -- confirmed via backtest_explosive_signal.py returning zero real-data matches
+    // across 132k signal-days. Absorption instead compares NET ORDER FLOW over a recent
+    // window against the PRICE OUTCOME over that same window -- two independent quantities.
+    // Keep absorption_window/absorption_baseline in sync with pavpEngine.ts / scan_real_market.py.
+    int absorption_window = 5
+    int absorption_baseline = 20
+    float cum_delta = math.sum(bar_delta_proxy, absorption_window)
+    float avg_abs_cum_delta = ta.sma(math.abs(cum_delta), absorption_baseline)
+    float window_start_close = close[absorption_window - 1]
+    float price_ret = window_start_close != 0 ? close / window_start_close - 1.0 : 0.0
 
     bool in_vah_phigh_zone = not na(vah_price_hist) and not na(p_high_hist) and close < p_high_hist and close > vah_price_hist
-    bool bullish_delta_ok = bar_delta_proxy < -avg_abs_delta_proxy * abs_mult and close > (high + low) / 2.0
+    // Bullish: heavy net SELLING over the last few bars, but price still held flat or rose
+    // over that same stretch -- sellers got absorbed instead of pushing price down.
+    bool bullish_delta_ok = cum_delta < -avg_abs_cum_delta * abs_mult and price_ret >= 0
     bool arrow_confirmed = in_vah_phigh_zone and bullish_delta_ok
 
-    // Mirror: close strictly between P Low and VAL AND a bearish absorption read
-    // on that same bar (trapped buyers -- heavy buy volume, weak close).
+    // Mirror: close strictly between P Low and VAL AND heavy net BUYING over the last few
+    // bars that still failed to push price up (trapped buyers / breakdown confirmation).
     bool in_val_plow_zone = not na(val_price_hist) and not na(p_low_hist) and close < val_price_hist and close > p_low_hist
-    bool bearish_delta_ok = bar_delta_proxy > avg_abs_delta_proxy * abs_mult and close < (high + low) / 2.0
+    bool bearish_delta_ok = cum_delta > avg_abs_cum_delta * abs_mult and price_ret <= 0
     bool arrow_bear_confirmed = in_val_plow_zone and bearish_delta_ok
 
     [close, p_high_hist, p_low_hist, vah_price_hist, val_price_hist, arrow_confirmed, arrow_bear_confirmed]

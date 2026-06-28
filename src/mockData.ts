@@ -1,4 +1,5 @@
 import type { Candle } from './pavpEngine';
+import { calculatePAVP } from './pavpEngine';
 
 export interface WatchlistItem {
   ticker: string;
@@ -106,7 +107,10 @@ export function generateHistoricalData(item: WatchlistItem, count: number = 250)
         priceChangePercent -= 0.0002; 
       }
     } else if (item.trend === 'explosive') {
-      // Historical strong uptrend, then tight consolidation right below the high
+      // Historical strong uptrend, then tight consolidation right below the high. The final
+      // 5 trading days are overwritten below (after this loop) with a scripted multi-day
+      // absorption + breakout pattern -- done as a post-process over the last 5 *array*
+      // entries (not raw loop index i) so it lands correctly regardless of weekend date-skips.
       if (i > 15) {
         priceChangePercent += 0.0018; // strong historical uptrend
         if (i > 70 && i < 100) priceChangePercent -= 0.003; // standard pullback
@@ -147,7 +151,7 @@ export function generateHistoricalData(item: WatchlistItem, count: number = 250)
     }
 
     // Calculate OHLC
-    let open = currentPrice;
+    const open = currentPrice;
     let close = currentPrice * (1 + priceChangePercent);
     
     // Safety caps
@@ -163,18 +167,6 @@ export function generateHistoricalData(item: WatchlistItem, count: number = 250)
       close = basePrice * 1.024;
       high = close * 1.002;
       low = basePrice * 0.965; // long wick below
-    }
-
-    if (item.trend === 'explosive' && i === 0) {
-      // Find the maximum high in previously generated candles to place close between VAH and highestPrice
-      const maxHigh = candles.length > 0 ? Math.max(...candles.map(c => c.high)) : currentPrice;
-      
-      // Override today's candle to be a fuchsia arrow candle (bullish absorption)
-      // and close lies between VAH and Profile High (approx 98.2% of maxHigh)
-      close = maxHigh * 0.982;
-      open = maxHigh * 0.970;
-      high = maxHigh * 0.988;
-      low = maxHigh * 0.948; // long tail below (sellers absorbed)
     }
 
     // Volume Calculations (VDU setup)
@@ -198,13 +190,84 @@ export function generateHistoricalData(item: WatchlistItem, count: number = 250)
       volume: Math.floor(volume)
     };
 
-    if (item.trend === 'explosive' && i === 0) {
-      candle.barDelta = -Math.floor(volume * 1.5);
-    }
-
     candles.push(candle);
 
     currentPrice = close;
+  }
+
+  // Post-process: overwrite the last 5 *array* entries (real trading days, dates already
+  // correctly weekend-skipped above) for the 'explosive' demo trend with a genuine multi-day
+  // absorption pattern -- 4 days of heavy net selling (each day's close pinned near its own
+  // low) absorbed on a gentle staircase-up in price/range, followed by a breakout candle that
+  // closes inside the [VAH, Profile High] zone. This is real OHLCV shape, not a synthetic
+  // barDelta override, so it satisfies pavpEngine.ts's cumulative-delta-vs-price-return
+  // absorption formula (ABSORPTION_WINDOW=5) using only daily OHLCV, same as production.
+  if (item.trend === 'explosive' && candles.length >= 10) {
+    const cutIndex = candles.length - 5;
+    const anchorPrice = candles[cutIndex - 1].close;
+
+    // 4 days of heavy net selling absorbed: opens near the day's high, sells off hard
+    // intraday, closes pinned near the day's own low (deep negative delta proxy) -- yet the
+    // day's range itself ratchets gently upward day over day, so price holds instead of
+    // breaking down.
+    for (let t = 0; t < 4; t++) {
+      const idx = cutIndex + t;
+      const levelBase = anchorPrice * (1 + 0.004 * t);
+      const dayHigh = levelBase * 1.010;
+      const dayLow = levelBase * 0.992;
+      const dayClose = dayLow + (dayHigh - dayLow) * 0.12; // bottom 12% of the day's range
+      const dayOpen = dayHigh * 0.997;
+      candles[idx] = {
+        ...candles[idx],
+        open: parseFloat(dayOpen.toFixed(2)),
+        high: parseFloat(dayHigh.toFixed(2)),
+        low: parseFloat(dayLow.toFixed(2)),
+        close: parseFloat(dayClose.toFixed(2)),
+        volume: Math.floor(volumeBase * 1.9)
+      };
+    }
+
+    // The volume-profile binning (and therefore VAH / Profile High) depends only on each
+    // bar's high/low/volume -- never its close. So fix this breakout bar's high/low/volume
+    // first, run calculatePAVP ONCE to read the real settled VAH/Profile High including this
+    // bar's contribution, then place close inside that zone with no feedback loop / guessing.
+    const lastIdx = candles.length - 1;
+    const preBreakoutCandles = candles.slice(0, cutIndex + 4);
+    const histHigh = Math.max(...preBreakoutCandles.map(c => c.high));
+    // Set slightly *above* the prior peak so this breakout bar deterministically becomes the
+    // new Profile High itself -- VAH is always <= Profile High by construction, so anchoring
+    // highestPrice to this bar's own high guarantees there is always room to place a valid
+    // close between VAH and Profile High (no risk of VAH landing above a conservative cap).
+    const breakoutHigh = histHigh * 1.001;
+    const breakoutLow = histHigh * 0.94;   // long tail below (sellers absorbed)
+    const breakoutVolume = Math.floor(volumeBase * (0.6 + Math.random() * 0.8));
+
+    candles[lastIdx] = {
+      ...candles[lastIdx],
+      open: parseFloat((breakoutHigh * 0.99).toFixed(2)),
+      high: parseFloat(breakoutHigh.toFixed(2)),
+      low: parseFloat(breakoutLow.toFixed(2)),
+      close: parseFloat(((breakoutHigh + breakoutLow) / 2).toFixed(2)), // placeholder, set below
+      volume: breakoutVolume
+    };
+
+    const settled = calculatePAVP(candles);
+    const svp = settled.volumeProfile;
+    const targetHighestPrice = svp ? svp.highestPrice : breakoutHigh;
+    const targetVah = svp ? svp.vah : breakoutHigh * 0.97;
+
+    let breakoutClose = targetVah + (targetHighestPrice - targetVah) * 0.5;
+    // Also floor it just above the absorption window's starting close (candles[cutIndex]) so
+    // the 5-day price return used by the absorption formula stays non-negative regardless of
+    // where VAH/Profile High land -- the whole point of the pattern is price holding/rising
+    // despite the heavy selling earlier in the window.
+    const windowStartClose = candles[cutIndex].close;
+    breakoutClose = Math.max(breakoutClose, windowStartClose * 1.001);
+    // Upper bound is this bar's own high (a valid candle can close at its own high), not a
+    // shrunk fraction of it -- VAH sometimes lands exactly at Profile High (a fully one-sided
+    // value area), and shrinking the cap would push close back below VAH in that case.
+    breakoutClose = Math.min(Math.max(breakoutClose, breakoutLow * 1.01), breakoutHigh);
+    candles[lastIdx].close = parseFloat(breakoutClose.toFixed(2));
   }
 
   return candles;

@@ -539,10 +539,25 @@ bool htf_sell_ok = not use_htf_filter or not htf_bullish
 float va_width = not na(vah_price_hist) and not na(val_price_hist) ? (vah_price_hist - val_price_hist) : na
 bool va_width_ok = na(va_width) or va_width >= min_va_width_ticks * reliance_tick
 
-// CVD Institutional Absorption (Decoupled Delta)
-float avg_abs_delta = ta.sma(math.abs(bar_delta), 20)
-bool cvd_bearish_absorption = near_resistance and bar_delta > avg_abs_delta * absorption_mult and close < (high + low) / 2.0
-bool cvd_bullish_absorption = near_support and bar_delta < -avg_abs_delta * absorption_mult and close > (high + low) / 2.0
+// CVD Institutional Absorption (multi-bar divergence). NOTE: comparing a SINGLE bar's delta
+// against that SAME bar's close-vs-midpoint is mathematically circular whenever bar_delta
+// falls back to the single-bar OHLCV proxy (close > midpoint <=> bar_delta > 0 by
+// construction) -- confirmed via backtest_explosive_signal.py returning zero real-data
+// matches across 132k signal-days on the equivalent daily-only formula. This compares the
+// CHANGE in the running cvd total over the last few bars (real intrabar delta when
+// ltf_sz > 0, the proxy otherwise) against price's own move over that same window -- two
+// independent quantities, valid either way. Keep absorption_window/absorption_baseline in
+// sync with reliance_scalping_composite.pine / pavpEngine.ts / scan_real_market.py /
+// nifty_range_screener.pine.
+int absorption_window = 5
+int absorption_baseline = 20
+float cvd_change = cvd - cvd[absorption_window]
+float avg_abs_cvd_change = ta.sma(math.abs(cvd_change), absorption_baseline)
+float window_start_close = close[absorption_window]
+float price_ret_window = window_start_close != 0 ? close / window_start_close - 1.0 : 0.0
+
+bool cvd_bearish_absorption = near_resistance and cvd_change > avg_abs_cvd_change * absorption_mult and price_ret_window <= 0
+bool cvd_bullish_absorption = near_support and cvd_change < -avg_abs_cvd_change * absorption_mult and price_ret_window >= 0
 
 // Divergence vs Volume Dry-Up vs CVD Absorption Gate
 bool prepare_buy_cond = require_div_entry ? (bullish_cvd_div or cvd_bullish_absorption) : (is_volume_dried_up or bullish_cvd_div or cvd_bullish_absorption)
@@ -591,7 +606,7 @@ plotshape(absorption_bullish, title="ABSORPTION BULLISH", style=shape.arrowup, l
 // matching nifty_range_screener.pine's arrow_confirmed logic and the AEGIS PAVP screener's
 // isExplosiveSetup() check in App.tsx.
 bool in_vah_phigh_zone = not na(vah_price_hist) and not na(p_high_hist) and close > vah_price_hist and close < p_high_hist
-bool vah_phigh_bull_confirm = in_vah_phigh_zone and bar_delta < -avg_abs_delta * absorption_mult and close > (high + low) / 2.0
+bool vah_phigh_bull_confirm = in_vah_phigh_zone and cvd_change < -avg_abs_cvd_change * absorption_mult and price_ret_window >= 0
 
 plotshape(vah_phigh_bull_confirm, title="VAH-P HIGH BULL CONFIRM", style=shape.triangleup, location=location.belowbar,
      color=color.aqua, size=size.small, text="VAH▲")
@@ -603,7 +618,7 @@ alertcondition(vah_phigh_bull_confirm, title="VAH->P High Bullish Confirm", mess
 // nifty_range_screener.pine's bear_arrow_confirmed logic and the AEGIS PAVP screener's
 // isCollapseSetup() check in App.tsx.
 bool in_val_plow_zone = not na(val_price_hist) and not na(p_low_hist) and close < val_price_hist and close > p_low_hist
-bool val_plow_bear_confirm = in_val_plow_zone and bar_delta > avg_abs_delta * absorption_mult and close < (high + low) / 2.0
+bool val_plow_bear_confirm = in_val_plow_zone and cvd_change > avg_abs_cvd_change * absorption_mult and price_ret_window <= 0
 
 plotshape(val_plow_bear_confirm, title="VAL-P LOW BEAR CONFIRM", style=shape.triangledown, location=location.abovebar,
      color=color.orange, size=size.small, text="VAL▼")

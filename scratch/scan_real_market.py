@@ -160,32 +160,54 @@ def calculate_pavp(candles, pvt_length=20, num_profile_levels=25, value_area_per
     vah = lowest_price + (level_above + 1) * price_step
     val = lowest_price + level_below * price_step
     
-    # 3. CVD Bullish Absorption
-    deltas = [c['barDelta'] for c in candles]
-    abs_deltas = [abs(d) for d in deltas]
-    
-    # Simple SMA 20 of absolute deltas
-    if len(abs_deltas) >= 20:
-        avg_abs_delta = sum(abs_deltas[-20:]) / 20.0
+    # 3. CVD Absorption (multi-day divergence). NOTE: a single bar's delta and "close vs. its
+    # own midpoint" are mathematically the SAME signal (close > midpoint <=> buyPct > 0.5 <=>
+    # delta > 0), so a same-bar check (delta very negative AND close > midpoint) can never be
+    # true -- confirmed via backtest_explosive_signal.py returning zero real-data matches
+    # across 132k signal-days. Absorption instead compares NET ORDER FLOW over a recent window
+    # against the PRICE OUTCOME over that same window -- two independent quantities. A stock
+    # can see heavy net selling (negative cumulative delta) over several days while price still
+    # holds flat or rises (trapped sellers / absorption), or heavy net buying while price holds
+    # flat or falls (trapped buyers). absorption_mult defaults to 1.5 to match
+    # reliance_scalping_composite.pine / reliance_scalping_strategy.pine / pavpEngine.ts --
+    # change all together.
+    ABSORPTION_WINDOW = 5     # trading days of order-flow + price action compared
+    ABSORPTION_BASELINE = 20  # trading days used to normalize "how big is big" for cumDelta
+
+    deltas = [c.get('barDelta') for c in candles]
+    if any(d is None for d in deltas):
+        deltas = []
+        for c in candles:
+            rng = max(c['high'] - c['low'], 0.0001)
+            buy_pct = (c['close'] - c['low']) / rng if (c['high'] - c['low']) > 0 else 0.5
+            deltas.append(c['volume'] * (2.0 * buy_pct - 1.0))
+
+    cum_delta_series = []
+    for i in range(n):
+        start = max(0, i - ABSORPTION_WINDOW + 1)
+        cum_delta_series.append(sum(deltas[start:i + 1]))
+    abs_cum_delta_series = [abs(d) for d in cum_delta_series]
+
+    if len(abs_cum_delta_series) >= ABSORPTION_BASELINE:
+        avg_abs_cum_delta = sum(abs_cum_delta_series[-ABSORPTION_BASELINE:]) / float(ABSORPTION_BASELINE)
     else:
-        avg_abs_delta = sum(abs_deltas) / max(1, len(abs_deltas))
-        
-    latest_delta = deltas[-1]
+        avg_abs_cum_delta = sum(abs_cum_delta_series) / max(1, len(abs_cum_delta_series))
+
+    latest_cum_delta = cum_delta_series[-1]
     latest_candle = candles[-1]
-    
-    # Upward fuchsia arrow criteria (CVD sellers absorbed, high close).
-    # absorption_mult defaults to 1.5 to match reliance_scalping_composite.pine /
-    # reliance_scalping_strategy.pine / pavpEngine.ts -- change all together.
+    window_start_close = closes[max(0, n - ABSORPTION_WINDOW)]
+    latest_price_ret = (closes[-1] / window_start_close - 1.0) if window_start_close > 0 else 0.0
+
+    # Bullish CVD Absorption: heavy net SELLING over the last few bars, but price still held
+    # flat or rose over that same stretch -- sellers got absorbed instead of pushing price down.
     is_bullish_absorption = (
-        latest_delta < -avg_abs_delta * absorption_mult and
-        latest_candle['close'] > (latest_candle['high'] + latest_candle['low']) / 2.0
+        latest_cum_delta < -avg_abs_cum_delta * absorption_mult and latest_price_ret >= 0
     )
 
-    # Downward fuchsia arrow criteria (CVD buyers absorbed, low close) -- mirrors
-    # is_bullish_absorption above. Trapped buyers near the top -> bearish reversal.
+    # Bearish CVD Absorption: heavy net BUYING over the last few bars, but price still held
+    # flat or fell over that same stretch -- buyers got absorbed instead of pushing price up.
     is_bearish_absorption = (
-        latest_delta > avg_abs_delta * absorption_mult and
-        latest_candle['close'] < (latest_candle['high'] + latest_candle['low']) / 2.0
+        latest_cum_delta > avg_abs_cum_delta * absorption_mult and latest_price_ret <= 0
     )
 
     # Simple Squeeze check
@@ -203,8 +225,8 @@ def calculate_pavp(candles, pvt_length=20, num_profile_levels=25, value_area_per
         'lowestPrice': float(lowest_price),
         'isBullishAbsorption': is_bullish_absorption,
         'isBearishAbsorption': is_bearish_absorption,
-        'latestDelta': float(latest_delta),
-        'avgAbsDelta': float(avg_abs_delta),
+        'latestCumDelta': float(latest_cum_delta),
+        'avgAbsCumDelta': float(avg_abs_cum_delta),
         'isSqueezed': is_squeezed,
         'proximityToPLow': float(proximity_to_p_low)
     }
@@ -215,59 +237,32 @@ def main():
     
     print(f"Downloading 1-year daily candles for {len(tickers)} symbols...")
     daily_data = yf.download(tickers, period="1y", interval="1d", group_by="ticker", progress=True)
-    
-    print(f"Downloading 1-month hourly candles for {len(tickers)} symbols...")
-    hourly_data = yf.download(tickers, period="1mo", interval="1h", group_by="ticker", progress=True)
-    
+
     results = []
     matches = []
-    
+
     print("Processing and analyzing symbols...")
     for idx, item in enumerate(stock_items):
         ticker = item['ticker']
         name = item['name']
         cap = item['capSize']
-        
+
         try:
-            # Check if yfinance returned data for this ticker in both downloads
-            if ticker not in daily_data or ticker not in hourly_data:
+            # Check if yfinance returned data for this ticker
+            if ticker not in daily_data:
                 continue
-                
+
             ticker_daily = daily_data[ticker].dropna(subset=['Close']).copy()
             if len(ticker_daily) < 50:
                 continue
-                
-            ticker_hourly = hourly_data[ticker].dropna(subset=['Close']).copy()
-            if len(ticker_hourly) < 20:
-                continue
-                
-            # 1. Compute default daily deltas
-            h = ticker_daily['High']
-            l = ticker_daily['Low']
-            c = ticker_daily['Close']
-            v = ticker_daily['Volume']
-            rng = h - l
-            buy_pct = np.where(rng > 0, (c - l) / rng, 0.5)
-            ticker_daily['barDelta'] = v * (2.0 * buy_pct - 1.0)
+
             ticker_daily['DateString'] = ticker_daily.index.strftime('%Y-%m-%d')
-            
-            # 2. Compute hourly true deltas and group by DateString
-            h_h = ticker_hourly['High']
-            h_l = ticker_hourly['Low']
-            h_c = ticker_hourly['Close']
-            h_v = ticker_hourly['Volume']
-            h_rng = h_h - h_l
-            h_buy_pct = np.where(h_rng > 0, (h_c - h_l) / h_rng, 0.5)
-            ticker_hourly['HourDelta'] = h_v * (2.0 * h_buy_pct - 1.0)
-            ticker_hourly['DateString'] = ticker_hourly.index.strftime('%Y-%m-%d')
-            hourly_grouped = ticker_hourly.groupby('DateString')['HourDelta'].sum()
-            
-            # 3. Align and update daily deltas with true hourly deltas
-            ticker_daily = ticker_daily.set_index('DateString')
-            ticker_daily.update(pd.DataFrame({'barDelta': hourly_grouped}))
-            ticker_daily = ticker_daily.reset_index()
-            
-            # 4. Generate daily candle objects
+
+            # Generate daily candle objects. No barDelta is attached here -- calculate_pavp()
+            # derives its own multi-day CVD absorption signal purely from OHLCV (see the
+            # ABSORPTION_WINDOW/ABSORPTION_BASELINE logic above; a same-bar barDelta override
+            # used to come from a separate hourly fetch, but that path was dropped because the
+            # multi-day daily-only signal supersedes it and keeps this in sync with pavpEngine.ts).
             candles = []
             for _, row in ticker_daily.iterrows():
                 candles.append({
@@ -277,9 +272,8 @@ def main():
                     'low': float(row['Low']),
                     'close': float(row['Close']),
                     'volume': int(row['Volume']),
-                    'barDelta': float(row['barDelta'])
                 })
-                
+
             # Run PAVP Profile Engine
             pavp_res = calculate_pavp(candles)
             if not pavp_res:
