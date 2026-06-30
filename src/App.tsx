@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { calculatePAVP, type Candle, type PAVPResult } from './pavpEngine';
 import { INDIAN_WATCHLIST, generateHistoricalData } from './mockData';
 import { Search, RefreshCw, Layers, ArrowUpDown } from 'lucide-react';
+import { MostActiveByDate } from './components/MostActiveByDate';
 
 
 interface ScannedStock {
@@ -848,6 +849,9 @@ export default function App() {
           </div>
 
         </div>
+
+        {/* Most Active Stocks By Date Card */}
+        <MostActiveByDate />
 
       </main>
 

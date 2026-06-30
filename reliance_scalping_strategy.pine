@@ -24,6 +24,8 @@ value_area_pct = input.float(68.0, "Value Area Percentage (%)", minval=10.0, max
 profile_width_bars = input.int(35, "Profile Width (Bars)", minval=5, maxval=100, group=group_vp)
 level_proximity = input.float(0.3, "Level Proximity Buffer (%)", minval=0.01, maxval=5.0, group=group_vp,
      tooltip="How close price needs to be to VAL/VAH/POC to trigger alerts (percentage of price).")
+show_volume_profile = input.bool(false, "Show Volume Profile Boxes", group=group_vp,
+     tooltip="The horizontal teal/gray/orange bars showing volume distribution at each price level. Off by default to keep the chart clean -- POC/VAH/VAL lines and all signals still work the same either way, this only hides the bars themselves.")
 
 group_ltf = "Lower Timeframe Data (Footprint / CVD)"
 lowerTimeframe = input.timeframe("1", "LTF for Footprint/CVD", group=group_ltf, 
@@ -37,6 +39,22 @@ absorption_mult = input.float(1.5, "Absorption Sensitivity (x Avg Abs Delta)", m
      tooltip="How far bar_delta must diverge from its 20-bar average to count as CVD absorption. Kept in sync with reliance_scalping_composite.pine / pavpEngine.ts / scan_real_market.py -- change all together.")
 confirm_on_close = input.bool(false, "Require Closed-Bar Confirmation for Footprint Absorption", group=group_ltf,
      tooltip="OFF (default): trapped buyer/seller detection recalculates every tick, including on the live/most-recent candle. ON: only counts fully-closed bars (the arrow will always be at least one bar behind).")
+
+group_fade = "Buyer/Seller Pressure (Fade Warning)"
+show_buyer_seller_plot = input.bool(true, "Show Buyer/Seller Pressure Line on Chart", group=group_fade,
+     tooltip="Plots net buy vs sell sub-bar count at the bottom of the price chart (like the CVD line) so you can watch buying or selling pressure thin out candle by candle, without hovering anything.")
+fade_smooth_len = input.int(3, "Pressure Line Smoothing (Bars)", minval=1, maxval=10, group=group_fade,
+     tooltip="Light EMA smoothing on the buyer/seller pressure line so the rise/fall trend is readable instead of jagged noise. Lower = more reactive per-candle, higher = smoother trend.")
+fade_lookback = input.int(3, "Consecutive Declining Bars to Flag", minval=2, maxval=10, group=group_fade,
+     tooltip="How many bars in a row buy (or sell) sub-bar count must shrink before the 'fading' warning marker fires.")
+show_fade_markers = input.bool(true, "Show Buyers/Sellers Fading Markers", group=group_fade,
+     tooltip="Marks bars where buying pressure has declined for N bars straight (possible top forming) or selling pressure has declined for N bars straight (possible bottom forming). An early-warning heuristic, not a guaranteed reversal.")
+
+group_heat = "Buyer/Seller Control Heat Map"
+show_heatmap = input.bool(true, "Show Control Heat Map Background", group=group_heat,
+     tooltip="Tints each candle's background green when buyers dominate that candle's intrabar sub-bars, red when sellers do. Darker = more one-sided control, lighter = closer to a 50/50 split.")
+heatmap_intensity = input.float(35.0, "Max Heat Map Intensity (%)", minval=10.0, maxval=70.0, group=group_heat,
+     tooltip="How dark the tint gets at maximum one-sided control (100% buy or sell sub-bars). Kept low/medium by default so candles and other plots stay fully readable.")
 
 group_htf = "Higher Timeframe Trend Filter"
 use_htf_filter = input.bool(true, "Enable 1H Trend Filter", group=group_htf)
@@ -95,7 +113,14 @@ int ltf_sz = array.size(ltf_closes)
 // 3. CUMULATIVE VOLUME DELTA (CVD) CALCULATIONS
 // ==========================================
 
+// "Buy/sell sub-bars" below is the closest available proxy to "number of buyers/sellers" --
+// no market data feed (free or paid) publishes literal unique participant counts, so this
+// instead counts how many intrabar lower-timeframe sub-bars closed in the upper vs lower half
+// of their own range (net buying vs net selling pressure), the same heuristic already used for
+// bar_delta, just tallied per sub-bar instead of summed.
 float bar_delta = 0.0
+int buy_subbars = 0
+int sell_subbars = 0
 if ltf_sz > 0
     for i = 0 to ltf_sz - 1
         float l_h = array.get(ltf_highs, i)
@@ -105,10 +130,18 @@ if ltf_sz > 0
         float l_range = l_h - l_l
         float buy_pct = l_range > 0.0 ? (l_c - l_l) / l_range : 0.5
         bar_delta += l_v * (2.0 * buy_pct - 1.0)
+        if buy_pct > 0.5
+            buy_subbars += 1
+        else if buy_pct < 0.5
+            sell_subbars += 1
 else
     float c_range = high - low
     float buy_pct = c_range > 0.0 ? (close - low) / c_range : 0.5
     bar_delta := volume * (2.0 * buy_pct - 1.0)
+    if buy_pct > 0.5
+        buy_subbars := 1
+    else if buy_pct < 0.5
+        sell_subbars := 1
 
 bool is_new_day = ta.change(time("D")) != 0
 var float cvd = 0.0
@@ -133,8 +166,83 @@ float norm_cvd = lowest_price + ((cvd - lowest_cvd) / cvd_range) * (price_range 
 float norm_cvd_ema = lowest_price + ((cvd_ema - lowest_cvd) / cvd_range) * (price_range * 0.15)
 
 // Plot CVD and its signal line (if enabled in settings)
-plot(show_cvd_plots ? norm_cvd : na, "Normalized CVD", color=color.purple, linewidth=2)
-plot(show_cvd_plots ? norm_cvd_ema : na, "CVD Signal (EMA)", color=color.orange, linewidth=1, style=plot.style_line)
+plot(show_cvd_plots ? norm_cvd : na, "Normalized CVD", color=color.purple, linewidth=2, display=display.pane)
+plot(show_cvd_plots ? norm_cvd_ema : na, "CVD Signal (EMA)", color=color.orange, linewidth=1, style=plot.style_line, display=display.pane)
+
+// Per-candle order-flow detail -- not drawn on the chart, but readable for ANY candle by
+// hovering it (TradingView's Data Window / status-line legend), same way OHLCV is read off a
+// candle. buy_subbars/sell_subbars are intrabar sub-bar counts (see note above), bar_delta is
+// this candle's own estimated net volume, cvd is the running cumulative total.
+plot(buy_subbars, "Buy Sub-Bars (Intrabar)", display=display.data_window)
+plot(sell_subbars, "Sell Sub-Bars (Intrabar)", display=display.data_window)
+plot(bar_delta, "Day Delta (Est. Net Volume)", display=display.data_window)
+plot(cvd, "CVD (Cumulative)", display=display.data_window)
+
+// ==========================================
+// 3b. BUYER/SELLER PRESSURE LINE & FADE WARNING
+// ==========================================
+// User-facing idea: if the count of BUYING sub-bars keeps shrinking candle after candle while
+// price is still climbing, fewer participants are willing to keep paying up -- a classic
+// early-warning (momentum/participation divergence), not a guarantee a reversal happens.
+// Mirrored on the downside for SELLING sub-bars thinning out under falling price. Both are
+// drawn directly on the price chart so they're visible at a glance, the same way the
+// Normalized CVD line above is, rather than needing to hover/inspect each candle.
+
+float net_subbars = buy_subbars - sell_subbars
+float net_subbars_smooth = ta.ema(net_subbars, fade_smooth_len)
+
+float highest_net = ta.highest(net_subbars_smooth, norm_len)
+float lowest_net = ta.lowest(net_subbars_smooth, norm_len)
+float net_range = math.max(highest_net - lowest_net, 1.0)
+float norm_net_subbars = lowest_price + ((net_subbars_smooth - lowest_net) / net_range) * (price_range * 0.15)
+
+plot(show_buyer_seller_plot ? norm_net_subbars : na, "Buyer/Seller Pressure (Net Sub-Bars)",
+     color = net_subbars_smooth >= net_subbars_smooth[1] ? color.lime : color.red, linewidth=2, display=display.pane)
+
+// Consecutive-decline streaks -- "buyers fading" = buy sub-bar count shrank N bars straight,
+// "sellers fading" = sell sub-bar count shrank N bars straight.
+bool buy_declining = buy_subbars < buy_subbars[1]
+bool sell_declining = sell_subbars < sell_subbars[1]
+
+var int buy_decline_streak = 0
+var int sell_decline_streak = 0
+buy_decline_streak := buy_declining ? buy_decline_streak + 1 : 0
+sell_decline_streak := sell_declining ? sell_decline_streak + 1 : 0
+
+bool buyers_fading = buy_decline_streak >= fade_lookback
+bool sellers_fading = sell_decline_streak >= fade_lookback
+
+plotshape(show_fade_markers and buyers_fading, title="BUYERS FADING", style=shape.triangledown, location=location.abovebar,
+     color=color.new(color.orange, 20), size=size.tiny, text="Buyers↓", display=display.pane)
+plotshape(show_fade_markers and sellers_fading, title="SELLERS FADING", style=shape.triangleup, location=location.belowbar,
+     color=color.new(color.blue, 20), size=size.tiny, text="Sellers↓", display=display.pane)
+
+alertcondition(buyers_fading, title="Buyers Fading (Possible Top Forming)", message="{{ticker}}: buying sub-bar count has declined several bars straight -- waning buy pressure, watch for a possible reversal down")
+alertcondition(sellers_fading, title="Sellers Fading (Possible Bottom Forming)", message="{{ticker}}: selling sub-bar count has declined several bars straight -- waning sell pressure, watch for a possible reversal up")
+
+// ==========================================
+// 3c. BUYER/SELLER CONTROL HEAT MAP
+// ==========================================
+// Maps each candle's buy-vs-sell sub-bar split to a translucent chart background tint --
+// darker green = buyers held a larger share of this candle's intrabar activity, darker red =
+// sellers did, faint/near-invisible = roughly a 50/50 split. This is a glanceable summary of
+// the SAME buy_subbars/sell_subbars counts already exposed in the Data Window, just painted
+// directly behind the candles instead of needing to hover each one. Capped to a low/medium
+// opacity (via heatmap_intensity) so it never obscures candles or the other plots/zones.
+int total_subbars = buy_subbars + sell_subbars
+float control_ratio = total_subbars > 0 ? (buy_subbars - sell_subbars) / total_subbars : 0.0  // -1 (all sellers) .. +1 (all buyers)
+
+float heat_min_transp = 97.0  // near-invisible tint when control is close to 50/50
+float heat_max_transp = 100.0 - heatmap_intensity  // most visible tint at full one-sided control
+float heat_transp = heat_min_transp - math.abs(control_ratio) * (heat_min_transp - heat_max_transp)
+
+color heat_color = na
+if control_ratio > 0
+    heat_color := color.new(color.green, heat_transp)
+else if control_ratio < 0
+    heat_color := color.new(color.red, heat_transp)
+
+bgcolor(show_heatmap ? heat_color : na, title="Buyer/Seller Control Heat Map")
 
 // ==========================================
 // 4. PIVOT ANCHORED VOLUME PROFILE (PAVP)
@@ -252,28 +360,31 @@ if last_pivot_index > 0 and bar_index > last_bar_index - 3000
         if not na(line_val)
             line.delete(line_val)
             
-        // Draw profile boxes
-        for k = 0 to num_profile_levels - 1
-            float bin_vol = array.get(bin_vols, k)
-            if bin_vol > 0
-                float bin_low = min_p + k * bin_size
-                float bin_high = bin_low + bin_size
-                
-                int box_width = math.round((bin_vol / max_bin_vol) * profile_width_bars)
-                int left_bar = start_bar_index
-                int right_bar = start_bar_index + box_width
-                
-                bool is_va = (k >= level_below and k <= level_above)
-                color bg_col = is_va ? color.new(color.teal, 85) : color.new(color.gray, 90)
-                color border_col = is_va ? color.new(color.teal, 75) : color.new(color.gray, 85)
-                
-                if k == poc_level
-                    bg_col := color.new(color.orange, 70)
-                    border_col := color.orange
-                    
-                box b = box.new(left=left_bar, top=bin_high, right=right_bar, bottom=bin_low,
-                                 bgcolor=bg_col, border_color=border_col, border_width=1)
-                array.push(profile_boxes, b)
+        // Draw profile boxes (the horizontal volume bars) -- gated behind show_volume_profile.
+        // POC/VAH/VAL price levels (and every signal that depends on them) are computed above
+        // this block regardless, so turning the bars off doesn't change any logic, just the look.
+        if show_volume_profile
+            for k = 0 to num_profile_levels - 1
+                float bin_vol = array.get(bin_vols, k)
+                if bin_vol > 0
+                    float bin_low = min_p + k * bin_size
+                    float bin_high = bin_low + bin_size
+
+                    int box_width = math.round((bin_vol / max_bin_vol) * profile_width_bars)
+                    int left_bar = start_bar_index
+                    int right_bar = start_bar_index + box_width
+
+                    bool is_va = (k >= level_below and k <= level_above)
+                    color bg_col = is_va ? color.new(color.teal, 85) : color.new(color.gray, 90)
+                    color border_col = is_va ? color.new(color.teal, 75) : color.new(color.gray, 85)
+
+                    if k == poc_level
+                        bg_col := color.new(color.orange, 70)
+                        border_col := color.orange
+
+                    box b = box.new(left=left_bar, top=bin_high, right=right_bar, bottom=bin_low,
+                                     bgcolor=bg_col, border_color=border_col, border_width=1)
+                    array.push(profile_boxes, b)
                 
         line_poc := line.new(x1=start_bar_index, y1=poc_price, x2=bar_index, y2=poc_price, color=color.orange, width=2)
         line_vah := line.new(x1=start_bar_index, y1=vah_price, x2=bar_index, y2=vah_price, color=color.teal, style=line.style_dashed, width=1)
@@ -463,6 +574,15 @@ bool near_vah = not na(p_high_hist) and dist_vah <= level_proximity
 bool near_val = not na(p_low_hist) and dist_val <= level_proximity
 bool near_poc = not na(poc_price_hist) and dist_poc <= level_proximity
 
+// Combined "Reversal Likely" signal -- location (at P High/P Low) AND fading participation
+// (buyers/sellers thinning per the per-candle sub-bar counts above) BOTH true on the same bar.
+// Stricter than either alone: touching P High/P Low without fading buyers/sellers usually
+// means fresh momentum is still there and the level is more likely to break, while fading
+// without being at a level is just mid-range noise. Still a probability tilt, not a
+// guarantee -- a strong trend/news day can push straight through even when this fires.
+bool reversal_likely_bear = near_vah and buyers_fading
+bool reversal_likely_bull = near_val and sellers_fading
+
 string range_loc = "INSIDE RANGE"
 color range_loc_color = color.white
 string range_bias = "NEUTRAL"
@@ -583,9 +703,9 @@ bool sell_now = prepare_sell and (active_sell_imb or cvd_crossunder or cvd_beari
 
 // Warning Markers
 plotshape(prepare_buy and not buy_now, title="PREPARE LONG", style=shape.arrowup, location=location.belowbar,
-     color=color.yellow, size=size.small)
+     color=#B8860B, size=size.small, display=display.pane)
 plotshape(prepare_sell and not sell_now, title="PREPARE SHORT", style=shape.arrowdown, location=location.abovebar,
-     color=color.yellow, size=size.small)
+     color=#B8860B, size=size.small, display=display.pane)
 
 // Trapped Traders Reversals (Absorption - combined footprint and CVD absorption)
 // NOTE: these fire near SUPPORT (bullish) / RESISTANCE (bearish) by design -- they are
@@ -596,9 +716,9 @@ bool absorption_bearish = trapped_buyers or cvd_bearish_absorption
 bool absorption_bullish = trapped_sellers or cvd_bullish_absorption
 
 plotshape(absorption_bearish, title="ABSORPTION BEARISH", style=shape.arrowdown, location=location.abovebar,
-     color=color.fuchsia, size=size.small)
+     color=color.fuchsia, size=size.small, display=display.pane)
 plotshape(absorption_bullish, title="ABSORPTION BULLISH", style=shape.arrowup, location=location.belowbar,
-     color=color.fuchsia, size=size.small)
+     color=color.fuchsia, size=size.small, display=display.pane)
 
 // VAH -> P High Breakout Confirmation (separate from the support/resistance reversal arrows above).
 // Fires when the close sits inside the true Value-Area-High-to-Profile-High zone AND the same
@@ -609,7 +729,7 @@ bool in_vah_phigh_zone = not na(vah_price_hist) and not na(p_high_hist) and clos
 bool vah_phigh_bull_confirm = in_vah_phigh_zone and cvd_change < -avg_abs_cvd_change * absorption_mult and price_ret_window >= 0
 
 plotshape(vah_phigh_bull_confirm, title="VAH-P HIGH BULL CONFIRM", style=shape.triangleup, location=location.belowbar,
-     color=color.aqua, size=size.small, text="VAH▲")
+     color=color.aqua, size=size.small, text="VAH▲", display=display.pane)
 alertcondition(vah_phigh_bull_confirm, title="VAH->P High Bullish Confirm", message="{{ticker}}: price between VAH and P High with bullish absorption confirmation")
 
 // VAL -> P Low Breakdown Confirmation -- mirrors vah_phigh_bull_confirm above for the downside.
@@ -621,8 +741,19 @@ bool in_val_plow_zone = not na(val_price_hist) and not na(p_low_hist) and close 
 bool val_plow_bear_confirm = in_val_plow_zone and cvd_change > avg_abs_cvd_change * absorption_mult and price_ret_window <= 0
 
 plotshape(val_plow_bear_confirm, title="VAL-P LOW BEAR CONFIRM", style=shape.triangledown, location=location.abovebar,
-     color=color.orange, size=size.small, text="VAL▼")
+     color=color.orange, size=size.small, text="VAL▼", display=display.pane)
 alertcondition(val_plow_bear_confirm, title="VAL->P Low Bearish Confirm", message="{{ticker}}: price between P Low and VAL with bearish absorption confirmation")
+
+// Reversal Likely (combined location + fading-participation signal, defined above near
+// near_vah/near_val). Drawn bigger/labeled plainly since this is the highest-signal marker on
+// the chart -- meant to answer "is there no momentum left at this level" at a glance, without
+// reading the dashboard and the pressure line separately.
+plotshape(reversal_likely_bear, title="REVERSAL LIKELY (TOP)", style=shape.labeldown, location=location.abovebar,
+     color=color.new(color.maroon, 0), textcolor=color.white, size=size.normal, text="REVERSAL LIKELY", display=display.pane)
+plotshape(reversal_likely_bull, title="REVERSAL LIKELY (BOTTOM)", style=shape.labelup, location=location.belowbar,
+     color=color.new(color.teal, 0), textcolor=color.white, size=size.normal, text="REVERSAL LIKELY", display=display.pane)
+alertcondition(reversal_likely_bear, title="Reversal Likely - Top", message="{{ticker}}: at P High AND buyers fading -- momentum looks spent, watch for a reversal down")
+alertcondition(reversal_likely_bull, title="Reversal Likely - Bottom", message="{{ticker}}: at P Low AND sellers fading -- momentum looks spent, watch for a reversal up")
 
 // ==========================================
 // 6.5 AUTOMATED STRATEGY EXECUTION ENGINE
@@ -737,7 +868,9 @@ if trigger_exit_short
 var table dashboard = table.new(position.top_right, 4, show_footprint ? 25 : 7, bgcolor=color.new(color.black, 20), border_color=color.gray, border_width=1)
 
 format_vol(val) =>
-    val >= 1000000 ? str.tostring(val / 1000000.0, "#.##") + "M" : (val >= 1000 ? str.tostring(val / 1000.0, "#.#") + "K" : str.tostring(val, "#"))
+    float abs_val = math.abs(val)
+    string sign_str = val < 0 ? "-" : ""
+    sign_str + (abs_val >= 1000000 ? str.tostring(abs_val / 1000000.0, "#.##") + "M" : (abs_val >= 1000 ? str.tostring(abs_val / 1000.0, "#.#") + "K" : str.tostring(abs_val, "#")))
 
 if show_dashboard and barstate.islast
     // Clear and redraw dashboard headers
